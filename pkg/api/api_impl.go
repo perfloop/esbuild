@@ -820,10 +820,8 @@ func convertLocationToInternal(loc *Location) *logger.MsgLocation {
 }
 
 func convertMessagesToInternal(msgs []logger.Msg, kind logger.MsgKind, messages []Message) []logger.Msg {
-	if len(messages) > cap(msgs)-len(msgs) {
-		newMsgs := make([]logger.Msg, len(msgs), len(msgs)+len(messages))
-		copy(newMsgs, msgs)
-		msgs = newMsgs
+	if msgs == nil && len(messages) > 0 {
+		msgs = make([]logger.Msg, 0, len(messages))
 	}
 	for _, message := range messages {
 		var notes []logger.MsgData
