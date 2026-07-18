@@ -5,6 +5,7 @@ import (
 
 	"github.com/evanw/esbuild/internal/compat"
 	"github.com/evanw/esbuild/internal/config"
+	"github.com/evanw/esbuild/internal/test"
 )
 
 var css_suite = suite{
@@ -2650,4 +2651,70 @@ func TestCSSAssetPathsWithSpacesBundle(t *testing.T) {
 			},
 		},
 	})
+}
+
+func TestCSSConditionalImportDedupSharedPrefixes(t *testing.T) {
+	bundle := scanCSSConditionalImportFixture(t, map[string]string{
+		"/entry.css": `
+			@import "./outer.css" layer(outer) supports(display: grid) screen;
+			@import "./outer.css" layer(outer) supports(display: grid) screen;
+			@import "./outer.css" layer(outer) supports(display: grid) screen;
+			.entry { color: black }
+		`,
+		"/outer.css": `
+			@import "./shared.css" layer(inner) supports(color: red) (min-width: 1px);
+			.outer { color: blue }
+		`,
+		"/shared.css": `.shared { color: red }`,
+	})
+	test.AssertEqualWithDiff(t, compileCSSConditionalImportFixture(t, &bundle), `@media screen {
+  @supports (display: grid) {
+    @layer outer {
+      @media (min-width: 1px) {
+        @supports (color: red) {
+          @layer inner;
+        }
+      }
+    }
+  }
+}
+@media screen {
+  @supports (display: grid) {
+    @layer outer;
+  }
+}
+
+/* shared.css */
+@media screen {
+  @supports (display: grid) {
+    @layer outer {
+      @media (min-width: 1px) {
+        @supports (color: red) {
+          @layer inner {
+            .shared {
+              color: red;
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+/* outer.css */
+@media screen {
+  @supports (display: grid) {
+    @layer outer {
+      .outer {
+        color: blue;
+      }
+    }
+  }
+}
+
+/* entry.css */
+.entry {
+  color: black;
+}
+`)
 }
