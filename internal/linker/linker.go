@@ -3561,50 +3561,44 @@ func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order
 	// file. This works because in CSS, the last instance of a declaration
 	// overrides all previous instances of that declaration.
 	{
-		type duplicateKey struct {
-			kind          cssImportKind
-			sourceIndex   uint32
-			externalPath  logger.Path
-			conditionsKey conditionalImportConditionsKey
-		}
-		duplicates := make(map[duplicateKey][]int)
+		sourceIndexDuplicates := make(map[uint32]*conditionalImportDuplicates)
+		externalPathDuplicates := make(map[logger.Path]*conditionalImportDuplicates)
 
 	nextBackward:
 		for i := len(order) - 1; i >= 0; i-- {
 			entry := order[i]
+			var duplicates *conditionalImportDuplicates
 			switch entry.kind {
-			case cssImportSourceIndex, cssImportExternalPath:
-				// The layer-condition prefix is a necessary condition for
-				// redundancy. Hash collisions are checked by the full predicate.
-				key := duplicateKey{
-					kind:         entry.kind,
-					sourceIndex:  entry.sourceIndex,
-					externalPath: entry.externalPath,
+			case cssImportSourceIndex:
+				duplicates = sourceIndexDuplicates[entry.sourceIndex]
+				if duplicates == nil {
+					duplicates = &conditionalImportDuplicates{}
+					sourceIndexDuplicates[entry.sourceIndex] = duplicates
 				}
-				for {
-					for _, j := range duplicates[key] {
-						if isConditionalImportRedundant(entry.conditions, order[j].conditions) {
-							if entry.kind == cssImportSourceIndex {
-								order[i].kind = cssImportLayers
-								order[i].layers = c.graph.Files[entry.sourceIndex].InputFile.Repr.(*graph.CSSRepr).AST.LayersPostImport
-							} else {
-								// Don't remove duplicates entirely. The import conditions may
-								// still introduce layers to the layer order. Represent this as a
-								// file with an empty layer list.
-								order[i].kind = cssImportLayers
-							}
-							continue nextBackward
-						}
-					}
-					if int(key.conditionsKey.count) == len(entry.conditions) {
-						break
-					}
-					conditions := entry.conditions[int(key.conditionsKey.count)]
-					key.conditionsKey.hash = css_ast.HashTokens(key.conditionsKey.hash, conditions.Layers)
-					key.conditionsKey.count++
+
+			case cssImportExternalPath:
+				duplicates = externalPathDuplicates[entry.externalPath]
+				if duplicates == nil {
+					duplicates = &conditionalImportDuplicates{}
+					externalPathDuplicates[entry.externalPath] = duplicates
 				}
-				duplicates[key] = append(duplicates[key], i)
+
+			default:
+				continue
 			}
+			if duplicates.find(entry.conditions, order) != -1 {
+				if entry.kind == cssImportSourceIndex {
+					order[i].kind = cssImportLayers
+					order[i].layers = c.graph.Files[entry.sourceIndex].InputFile.Repr.(*graph.CSSRepr).AST.LayersPostImport
+				} else {
+					// Don't remove duplicates entirely. The import conditions may
+					// still introduce layers to the layer order. Represent this as a
+					// file with an empty layer list.
+					order[i].kind = cssImportLayers
+				}
+				continue nextBackward
+			}
+			duplicates.append(entry.conditions, i)
 		}
 	}
 
@@ -3613,9 +3607,8 @@ func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order
 	// copy instead of the last copy like other things in CSS.
 	{
 		type duplicateEntry struct {
-			layers           [][]string
-			indices          []int
-			conditionIndices map[conditionalImportConditionsKey][]int
+			layers [][]string
+			conditionalImportDuplicates
 		}
 		var layerDuplicates []duplicateEntry
 
@@ -3704,17 +3697,11 @@ func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order
 			if index == len(layerDuplicates) {
 				// This is the first time we've seen this combination of layer names.
 				// Allocate a new set of duplicate indices to track this combination.
-				layerDuplicates = append(layerDuplicates, duplicateEntry{
-					layers:           layersKey,
-					conditionIndices: make(map[conditionalImportConditionsKey][]int),
-				})
+				layerDuplicates = append(layerDuplicates, duplicateEntry{layers: layersKey})
 			}
-			duplicates := layerDuplicates[index].indices
-			conditionIndices := layerDuplicates[index].conditionIndices
-			if duplicateIndex := findLatestConditionalImportDuplicate(
-				entry.conditions, conditionIndices, duplicates, wipOrder,
-			); duplicateIndex != -1 {
-				wipIndex := duplicates[duplicateIndex]
+			duplicates := &layerDuplicates[index].conditionalImportDuplicates
+			if duplicateIndex := duplicates.find(entry.conditions, wipOrder); duplicateIndex != -1 {
+				wipIndex := duplicates.indices[duplicateIndex]
 				if entry.kind == cssImportLayers {
 					// Don't add this to the duplicate list below because it's redundant
 					continue nextForward
@@ -3742,17 +3729,19 @@ func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order
 				// This can be improved by dropping the empty layer. But we can
 				// only do this if there's nothing in between these two rules.
 				replaceEmptyLayer := false
-				if duplicateIndex == len(duplicates)-1 && wipIndex == len(wipOrder)-1 {
+				if duplicateIndex == len(duplicates.indices)-1 && wipIndex == len(wipOrder)-1 {
 					if other := wipOrder[wipIndex]; other.kind == cssImportLayers && importConditionsAreEqual(entry.conditions, other.conditions) {
 						// Remove the previous entry and then overwrite it below
-						previousKey := makeConditionalImportConditionsKey(other.conditions)
-						previousIndices := conditionIndices[previousKey]
-						if len(previousIndices) == 1 {
-							delete(conditionIndices, previousKey)
-						} else {
-							conditionIndices[previousKey] = previousIndices[:len(previousIndices)-1]
+						if conditionIndices := duplicates.conditionIndices; conditionIndices != nil {
+							previousKey := makeConditionalImportConditionsKey(other.conditions)
+							previousIndices := conditionIndices[previousKey]
+							if len(previousIndices) == 1 {
+								delete(conditionIndices, previousKey)
+							} else {
+								conditionIndices[previousKey] = previousIndices[:len(previousIndices)-1]
+							}
 						}
-						duplicates = duplicates[:duplicateIndex]
+						duplicates.indices = duplicates.indices[:duplicateIndex]
 						wipOrder = wipOrder[:wipIndex]
 						replaceEmptyLayer = true
 					}
@@ -3766,9 +3755,7 @@ func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order
 					continue nextForward
 				}
 			}
-			conditionKey := makeConditionalImportConditionsKey(entry.conditions)
-			conditionIndices[conditionKey] = append(conditionIndices[conditionKey], len(duplicates))
-			layerDuplicates[index].indices = append(duplicates, len(wipOrder))
+			duplicates.append(entry.conditions, len(wipOrder))
 			wipOrder = append(wipOrder, entry)
 		}
 
@@ -3826,6 +3813,42 @@ func makeConditionalImportConditionsKey(conditions []css_ast.ImportConditions) (
 		key.hash = css_ast.HashTokens(key.hash, conditions.Layers)
 	}
 	return
+}
+
+type conditionalImportDuplicates struct {
+	indices          []int
+	conditionIndices map[conditionalImportConditionsKey][]int
+}
+
+func (duplicates *conditionalImportDuplicates) find(earlier []css_ast.ImportConditions, order []cssImportOrder) int {
+	if duplicates.conditionIndices == nil {
+		last := len(duplicates.indices) - 1
+		if last < 0 {
+			return -1
+		}
+
+		// Preserve the old reverse scan's fast path for repeated equal imports.
+		if isConditionalImportRedundant(earlier, order[duplicates.indices[last]].conditions) {
+			return last
+		}
+
+		// Build the condition index only after the latest import does not match.
+		// This avoids an O(n²) fallback when compatible conditions alternate.
+		duplicates.conditionIndices = make(map[conditionalImportConditionsKey][]int)
+		for i, index := range duplicates.indices {
+			key := makeConditionalImportConditionsKey(order[index].conditions)
+			duplicates.conditionIndices[key] = append(duplicates.conditionIndices[key], i)
+		}
+	}
+	return findLatestConditionalImportDuplicate(earlier, duplicates.conditionIndices, duplicates.indices, order)
+}
+
+func (duplicates *conditionalImportDuplicates) append(conditions []css_ast.ImportConditions, index int) {
+	if conditionIndices := duplicates.conditionIndices; conditionIndices != nil {
+		key := makeConditionalImportConditionsKey(conditions)
+		conditionIndices[key] = append(conditionIndices[key], len(duplicates.indices))
+	}
+	duplicates.indices = append(duplicates.indices, index)
 }
 
 func findLastIndexBefore(indices []int, before int) int {
