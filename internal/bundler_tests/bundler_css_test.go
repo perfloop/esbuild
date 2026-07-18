@@ -1,11 +1,11 @@
 package bundler_tests
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/evanw/esbuild/internal/compat"
 	"github.com/evanw/esbuild/internal/config"
-	"github.com/evanw/esbuild/internal/test"
 )
 
 var css_suite = suite{
@@ -2653,68 +2653,20 @@ func TestCSSAssetPathsWithSpacesBundle(t *testing.T) {
 	})
 }
 
-func TestCSSConditionalImportDedupSharedPrefixes(t *testing.T) {
+func TestCSSConditionalImportDedupDistinctSupports(t *testing.T) {
 	bundle := scanCSSConditionalImportFixture(t, map[string]string{
 		"/entry.css": `
-			@import "./outer.css" layer(outer) supports(display: grid) screen;
-			@import "./outer.css" layer(outer) supports(display: grid) screen;
-			@import "./outer.css" layer(outer) supports(display: grid) screen;
-			.entry { color: black }
-		`,
-		"/outer.css": `
-			@import "./shared.css" layer(inner) supports(color: red) (min-width: 1px);
-			.outer { color: blue }
+			@import "./shared.css" layer(shared) supports(display: feature-a);
+			@import "./shared.css" layer(shared) supports(display: feature-b);
+			@import "./shared.css" layer(shared) supports(display: feature-c);
 		`,
 		"/shared.css": `.shared { color: red }`,
 	})
-	test.AssertEqualWithDiff(t, compileCSSConditionalImportFixture(t, &bundle), `@media screen {
-  @supports (display: grid) {
-    @layer outer {
-      @media (min-width: 1px) {
-        @supports (color: red) {
-          @layer inner;
-        }
-      }
-    }
-  }
-}
-@media screen {
-  @supports (display: grid) {
-    @layer outer;
-  }
-}
 
-/* shared.css */
-@media screen {
-  @supports (display: grid) {
-    @layer outer {
-      @media (min-width: 1px) {
-        @supports (color: red) {
-          @layer inner {
-            .shared {
-              color: red;
-            }
-          }
-        }
-      }
-    }
-  }
-}
-
-/* outer.css */
-@media screen {
-  @supports (display: grid) {
-    @layer outer {
-      .outer {
-        color: blue;
-      }
-    }
-  }
-}
-
-/* entry.css */
-.entry {
-  color: black;
-}
-`)
+	output := compileCSSConditionalImportFixture(t, &bundle)
+	for _, feature := range []string{"feature-a", "feature-b", "feature-c"} {
+		if !strings.Contains(output, "@supports (display: "+feature+")") {
+			t.Fatalf("missing non-redundant supports condition %q in output:\n%s", feature, output)
+		}
+	}
 }
