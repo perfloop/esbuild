@@ -1,6 +1,7 @@
 package bundler_tests
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -2667,6 +2668,43 @@ func TestCSSConditionalImportDedupDistinctSupports(t *testing.T) {
 	for _, feature := range []string{"feature-a", "feature-b", "feature-c"} {
 		if !strings.Contains(output, "@supports (display: "+feature+")") {
 			t.Fatalf("missing non-redundant supports condition %q in output:\n%s", feature, output)
+		}
+	}
+}
+
+func cssConditionalImportDeepConditionFiles(depth int) map[string]string {
+	files := map[string]string{
+		"/entry.css": `
+			@import "./a01.css";
+			@import "./b01.css";
+			@import "./c01.css";
+		`,
+		"/shared.css": `.shared { color: red }`,
+	}
+
+	for _, branch := range []string{"a", "b", "c"} {
+		for i := 1; i <= depth; i++ {
+			next := "/shared.css"
+			if i < depth {
+				next = fmt.Sprintf("/%s%02d.css", branch, i+1)
+			}
+			supports := "common"
+			if i == depth {
+				supports = "feature-" + branch
+			}
+			files[fmt.Sprintf("/%s%02d.css", branch, i)] = fmt.Sprintf(`@import %q layer(shared) supports(display: %s) screen;`, next, supports)
+		}
+	}
+
+	return files
+}
+
+func TestCSSConditionalImportDedupDeepConditionPrefixes(t *testing.T) {
+	bundle := scanCSSConditionalImportFixture(t, cssConditionalImportDeepConditionFiles(10))
+	output := compileCSSConditionalImportFixture(t, &bundle)
+	for _, branch := range []string{"a", "b", "c"} {
+		if !strings.Contains(output, "feature-"+branch) {
+			t.Fatalf("missing non-redundant nested supports condition feature-%s in output:\n%s", branch, output)
 		}
 	}
 }
