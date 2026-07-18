@@ -198,20 +198,7 @@ func BenchmarkConditionalCSSImportIndexCoverage(b *testing.B) {
 	b.Run("external-distinct-1000", func(b *testing.B) {
 		benchmarkConditionalCSSImportIndex(b, conditionalCSSImportIndexExternal(1000))
 	})
-	for _, config := range []struct {
-		name      string
-		depth     int
-		fullCount int
-	}{
-		{name: "fanout-k4-r8", depth: 4, fullCount: 8},
-		{name: "fanout-k4-r64", depth: 4, fullCount: 64},
-		{name: "fanout-k6-r16", depth: 6, fullCount: 16},
-		{name: "fanout-k6-r256", depth: 6, fullCount: 256},
-		{name: "fanout-k8-r64", depth: 8, fullCount: 64},
-		{name: "fanout-k8-r1024", depth: 8, fullCount: 1024},
-	} {
-		b.Run(config.name, func(b *testing.B) {
-			benchmarkConditionalCSSImportIndex(b, conditionalCSSImportIndexFanout(config.depth, config.fullCount))
-		})
-	}
+	b.Run("fanout-k8-r1024", func(b *testing.B) {
+		benchmarkConditionalCSSImportIndex(b, conditionalCSSImportIndexFanout(8, 1024))
+	})
 }
