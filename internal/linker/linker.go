@@ -3381,6 +3381,102 @@ type cssImportOrder struct {
 	kind cssImportKind
 }
 
+// This index avoids comparing condition tokens that cannot make an import
+// redundant. Hash collisions are validated with isConditionalImportRedundant.
+type cssImportConditionsIndex struct {
+	indices  []int
+	children map[uint32]*cssImportConditionsIndex
+}
+
+func hashCSSImportConditions(condition css_ast.ImportConditions) uint32 {
+	hash := css_ast.HashTokens(0, condition.Layers)
+	hash = css_ast.HashTokens(hash, condition.Supports)
+	return css_ast.HashMediaQueries(hash, condition.Queries)
+}
+
+func (index *cssImportConditionsIndex) add(conditions []css_ast.ImportConditions, orderIndex int) {
+	for _, condition := range conditions {
+		hash := hashCSSImportConditions(condition)
+		if index.children == nil {
+			index.children = make(map[uint32]*cssImportConditionsIndex)
+		}
+		child := index.children[hash]
+		if child == nil {
+			child = &cssImportConditionsIndex{}
+			index.children[hash] = child
+		}
+		index = child
+	}
+	index.indices = append(index.indices, orderIndex)
+}
+
+func (index *cssImportConditionsIndex) findRedundant(earlier []css_ast.ImportConditions, order []cssImportOrder) (int, bool) {
+	latest := -1
+	var visit func(*cssImportConditionsIndex, int)
+	visit = func(index *cssImportConditionsIndex, conditionIndex int) {
+		for _, orderIndex := range index.indices {
+			if orderIndex > latest && isConditionalImportRedundant(earlier, order[orderIndex].conditions) {
+				latest = orderIndex
+			}
+		}
+
+		if conditionIndex == len(earlier) {
+			return
+		}
+
+		condition := earlier[conditionIndex]
+		hashes := [3]uint32{
+			hashCSSImportConditions(condition),
+			hashCSSImportConditions(css_ast.ImportConditions{Layers: condition.Layers, Queries: condition.Queries}),
+			hashCSSImportConditions(css_ast.ImportConditions{Layers: condition.Layers, Supports: condition.Supports}),
+		}
+		for i, hash := range hashes {
+			isDuplicate := false
+			for _, previousHash := range hashes[:i] {
+				if hash == previousHash {
+					isDuplicate = true
+					break
+				}
+			}
+			if !isDuplicate {
+				if child := index.children[hash]; child != nil {
+					visit(child, conditionIndex+1)
+				}
+			}
+		}
+	}
+	visit(index, 0)
+	return latest, latest != -1
+}
+
+type cssImportDuplicateIndex struct {
+	indices    []int
+	conditions *cssImportConditionsIndex
+}
+
+func (index *cssImportDuplicateIndex) add(conditions []css_ast.ImportConditions, orderIndex int, order []cssImportOrder) {
+	if index.conditions != nil {
+		index.conditions.add(conditions, orderIndex)
+	} else if len(index.indices) == 1 {
+		conditionIndex := &cssImportConditionsIndex{}
+		conditionIndex.add(order[index.indices[0]].conditions, index.indices[0])
+		conditionIndex.add(conditions, orderIndex)
+		index.conditions = conditionIndex
+	}
+	index.indices = append(index.indices, orderIndex)
+}
+
+func (index *cssImportDuplicateIndex) reset(order []cssImportOrder) {
+	index.conditions = nil
+	if len(index.indices) > 1 {
+		conditionIndex := &cssImportConditionsIndex{}
+		for _, orderIndex := range index.indices {
+			conditionIndex.add(order[orderIndex].conditions, orderIndex)
+		}
+		index.conditions = conditionIndex
+	}
+}
+
 // CSS files are traversed in depth-first postorder just like JavaScript. But
 // unlike JavaScript import statements, CSS "@import" rules are evaluated every
 // time instead of just the first time.
@@ -3561,36 +3657,60 @@ func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order
 	// file. This works because in CSS, the last instance of a declaration
 	// overrides all previous instances of that declaration.
 	{
-		sourceIndexDuplicates := make(map[uint32][]int)
-		externalPathDuplicates := make(map[logger.Path][]int)
+		sourceIndexDuplicates := make(map[uint32]cssImportDuplicateIndex)
+		externalPathDuplicates := make(map[logger.Path]cssImportDuplicateIndex)
 
 	nextBackward:
 		for i := len(order) - 1; i >= 0; i-- {
 			entry := order[i]
 			switch entry.kind {
 			case cssImportSourceIndex:
-				duplicates := sourceIndexDuplicates[entry.sourceIndex]
-				for _, j := range duplicates {
-					if isConditionalImportRedundant(entry.conditions, order[j].conditions) {
-						order[i].kind = cssImportLayers
-						order[i].layers = c.graph.Files[entry.sourceIndex].InputFile.Repr.(*graph.CSSRepr).AST.LayersPostImport
-						continue nextBackward
+				duplicates, ok := sourceIndexDuplicates[entry.sourceIndex]
+				if ok {
+					if duplicates.conditions != nil {
+						if _, ok := duplicates.conditions.findRedundant(entry.conditions, order); ok {
+							order[i].kind = cssImportLayers
+							order[i].layers = c.graph.Files[entry.sourceIndex].InputFile.Repr.(*graph.CSSRepr).AST.LayersPostImport
+							continue nextBackward
+						}
+					} else {
+						for _, orderIndex := range duplicates.indices {
+							if isConditionalImportRedundant(entry.conditions, order[orderIndex].conditions) {
+								order[i].kind = cssImportLayers
+								order[i].layers = c.graph.Files[entry.sourceIndex].InputFile.Repr.(*graph.CSSRepr).AST.LayersPostImport
+								continue nextBackward
+							}
+						}
 					}
 				}
-				sourceIndexDuplicates[entry.sourceIndex] = append(duplicates, i)
+				duplicates.add(entry.conditions, i, order)
+				sourceIndexDuplicates[entry.sourceIndex] = duplicates
 
 			case cssImportExternalPath:
-				duplicates := externalPathDuplicates[entry.externalPath]
-				for _, j := range duplicates {
-					if isConditionalImportRedundant(entry.conditions, order[j].conditions) {
-						// Don't remove duplicates entirely. The import conditions may
-						// still introduce layers to the layer order. Represent this as a
-						// file with an empty layer list.
-						order[i].kind = cssImportLayers
-						continue nextBackward
+				duplicates, ok := externalPathDuplicates[entry.externalPath]
+				if ok {
+					if duplicates.conditions != nil {
+						if _, ok := duplicates.conditions.findRedundant(entry.conditions, order); ok {
+							// Don't remove duplicates entirely. The import conditions may
+							// still introduce layers to the layer order. Represent this as a
+							// file with an empty layer list.
+							order[i].kind = cssImportLayers
+							continue nextBackward
+						}
+					} else {
+						for _, orderIndex := range duplicates.indices {
+							if isConditionalImportRedundant(entry.conditions, order[orderIndex].conditions) {
+								// Don't remove duplicates entirely. The import conditions may
+								// still introduce layers to the layer order. Represent this as a
+								// file with an empty layer list.
+								order[i].kind = cssImportLayers
+								continue nextBackward
+							}
+						}
 					}
 				}
-				externalPathDuplicates[entry.externalPath] = append(duplicates, i)
+				duplicates.add(entry.conditions, i, order)
+				externalPathDuplicates[entry.externalPath] = duplicates
 			}
 		}
 	}
@@ -3600,8 +3720,8 @@ func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order
 	// copy instead of the last copy like other things in CSS.
 	{
 		type duplicateEntry struct {
-			layers  [][]string
-			indices []int
+			layers [][]string
+			cssImportDuplicateIndex
 		}
 		var layerDuplicates []duplicateEntry
 
@@ -3692,50 +3812,80 @@ func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order
 				// Allocate a new set of duplicate indices to track this combination.
 				layerDuplicates = append(layerDuplicates, duplicateEntry{layers: layersKey})
 			}
-			duplicates := layerDuplicates[index].indices
-			for j := len(duplicates) - 1; j >= 0; j-- {
-				if index := duplicates[j]; isConditionalImportRedundant(entry.conditions, wipOrder[index].conditions) {
-					if entry.kind != cssImportLayers {
-						// If an empty layer is followed immediately by a full layer and
-						// everything else is identical, then we don't need to emit the
-						// empty layer. For example:
-						//
-						//   @media screen {
-						//     @supports (display: grid) {
-						//       @layer foo;
-						//     }
-						//   }
-						//   @media screen {
-						//     @supports (display: grid) {
-						//       @layer foo {
-						//         div {
-						//           color: red;
-						//         }
-						//       }
-						//     }
-						//   }
-						//
-						// This can be improved by dropping the empty layer. But we can
-						// only do this if there's nothing in between these two rules.
-						if j == len(duplicates)-1 && index == len(wipOrder)-1 {
-							if other := wipOrder[index]; other.kind == cssImportLayers && importConditionsAreEqual(entry.conditions, other.conditions) {
-								// Remove the previous entry and then overwrite it below
-								duplicates = duplicates[:j]
-								wipOrder = wipOrder[:index]
-								break
+			duplicates := &layerDuplicates[index]
+			if duplicates.conditions == nil {
+				// Avoid constructing or consulting the condition index until this
+				// group has multiple non-redundant entries.
+				duplicateIndices := duplicates.indices
+				for j := len(duplicateIndices) - 1; j >= 0; j-- {
+					if duplicateIndex := duplicateIndices[j]; isConditionalImportRedundant(entry.conditions, wipOrder[duplicateIndex].conditions) {
+						if entry.kind != cssImportLayers {
+							// If an empty layer is followed immediately by a full layer and
+							// everything else is identical, then we don't need to emit the
+							// empty layer. For example:
+							//
+							//   @media screen {
+							//     @supports (display: grid) {
+							//       @layer foo;
+							//     }
+							//   }
+							//   @media screen {
+							//     @supports (display: grid) {
+							//       @layer foo {
+							//         div {
+							//           color: red;
+							//         }
+							//       }
+							//     }
+							//   }
+							//
+							// This can be improved by dropping the empty layer. But we can
+							// only do this if there's nothing in between these two rules.
+							if j == len(duplicateIndices)-1 && duplicateIndex == len(wipOrder)-1 {
+								if other := wipOrder[duplicateIndex]; other.kind == cssImportLayers && importConditionsAreEqual(entry.conditions, other.conditions) {
+									// Remove the previous entry and then overwrite it below
+									duplicateIndices = duplicateIndices[:j]
+									wipOrder = wipOrder[:duplicateIndex]
+									break
+								}
 							}
+
+							// Non-layer entries still need to be present because they have
+							// other side effects beside inserting things in the layer order
+							wipOrder = append(wipOrder, entry)
 						}
 
+						// Don't add this to the duplicate list below because it's redundant
+						continue nextForward
+					}
+				}
+				duplicates.indices = duplicateIndices
+			} else if duplicateIndex, ok := duplicates.conditions.findRedundant(entry.conditions, wipOrder); ok {
+				if entry.kind != cssImportLayers {
+					if duplicateIndex == duplicates.indices[len(duplicates.indices)-1] && duplicateIndex == len(wipOrder)-1 {
+						if other := wipOrder[duplicateIndex]; other.kind == cssImportLayers && importConditionsAreEqual(entry.conditions, other.conditions) {
+							// Remove the previous entry and then overwrite it below
+							duplicates.indices = duplicates.indices[:len(duplicates.indices)-1]
+							wipOrder = wipOrder[:duplicateIndex]
+							duplicates.reset(wipOrder)
+						} else {
+							// Non-layer entries still need to be present because they have
+							// other side effects beside inserting things in the layer order
+							wipOrder = append(wipOrder, entry)
+							continue nextForward
+						}
+					} else {
 						// Non-layer entries still need to be present because they have
 						// other side effects beside inserting things in the layer order
 						wipOrder = append(wipOrder, entry)
+						continue nextForward
 					}
-
+				} else {
 					// Don't add this to the duplicate list below because it's redundant
 					continue nextForward
 				}
 			}
-			layerDuplicates[index].indices = append(duplicates, len(wipOrder))
+			duplicates.add(entry.conditions, len(wipOrder), wipOrder)
 			wipOrder = append(wipOrder, entry)
 		}
 
