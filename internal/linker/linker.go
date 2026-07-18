@@ -3561,36 +3561,49 @@ func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order
 	// file. This works because in CSS, the last instance of a declaration
 	// overrides all previous instances of that declaration.
 	{
-		sourceIndexDuplicates := make(map[uint32][]int)
-		externalPathDuplicates := make(map[logger.Path][]int)
+		type duplicateKey struct {
+			kind          cssImportKind
+			sourceIndex   uint32
+			externalPath  logger.Path
+			conditionsKey conditionalImportConditionsKey
+		}
+		duplicates := make(map[duplicateKey][]int)
 
 	nextBackward:
 		for i := len(order) - 1; i >= 0; i-- {
 			entry := order[i]
 			switch entry.kind {
-			case cssImportSourceIndex:
-				duplicates := sourceIndexDuplicates[entry.sourceIndex]
-				for _, j := range duplicates {
-					if isConditionalImportRedundant(entry.conditions, order[j].conditions) {
-						order[i].kind = cssImportLayers
-						order[i].layers = c.graph.Files[entry.sourceIndex].InputFile.Repr.(*graph.CSSRepr).AST.LayersPostImport
-						continue nextBackward
-					}
+			case cssImportSourceIndex, cssImportExternalPath:
+				// The layer-condition prefix is a necessary condition for
+				// redundancy. Hash collisions are checked by the full predicate.
+				key := duplicateKey{
+					kind:         entry.kind,
+					sourceIndex:  entry.sourceIndex,
+					externalPath: entry.externalPath,
 				}
-				sourceIndexDuplicates[entry.sourceIndex] = append(duplicates, i)
-
-			case cssImportExternalPath:
-				duplicates := externalPathDuplicates[entry.externalPath]
-				for _, j := range duplicates {
-					if isConditionalImportRedundant(entry.conditions, order[j].conditions) {
-						// Don't remove duplicates entirely. The import conditions may
-						// still introduce layers to the layer order. Represent this as a
-						// file with an empty layer list.
-						order[i].kind = cssImportLayers
-						continue nextBackward
+				for {
+					for _, j := range duplicates[key] {
+						if isConditionalImportRedundant(entry.conditions, order[j].conditions) {
+							if entry.kind == cssImportSourceIndex {
+								order[i].kind = cssImportLayers
+								order[i].layers = c.graph.Files[entry.sourceIndex].InputFile.Repr.(*graph.CSSRepr).AST.LayersPostImport
+							} else {
+								// Don't remove duplicates entirely. The import conditions may
+								// still introduce layers to the layer order. Represent this as a
+								// file with an empty layer list.
+								order[i].kind = cssImportLayers
+							}
+							continue nextBackward
+						}
 					}
+					if int(key.conditionsKey.count) == len(entry.conditions) {
+						break
+					}
+					conditions := entry.conditions[int(key.conditionsKey.count)]
+					key.conditionsKey.hash = css_ast.HashTokens(key.conditionsKey.hash, conditions.Layers)
+					key.conditionsKey.count++
 				}
-				externalPathDuplicates[entry.externalPath] = append(duplicates, i)
+				duplicates[key] = append(duplicates[key], i)
 			}
 		}
 	}
@@ -3600,8 +3613,9 @@ func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order
 	// copy instead of the last copy like other things in CSS.
 	{
 		type duplicateEntry struct {
-			layers  [][]string
-			indices []int
+			layers           [][]string
+			indices          []int
+			conditionIndices map[conditionalImportConditionsKey][]int
 		}
 		var layerDuplicates []duplicateEntry
 
@@ -3690,51 +3704,70 @@ func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order
 			if index == len(layerDuplicates) {
 				// This is the first time we've seen this combination of layer names.
 				// Allocate a new set of duplicate indices to track this combination.
-				layerDuplicates = append(layerDuplicates, duplicateEntry{layers: layersKey})
+				layerDuplicates = append(layerDuplicates, duplicateEntry{
+					layers:           layersKey,
+					conditionIndices: make(map[conditionalImportConditionsKey][]int),
+				})
 			}
 			duplicates := layerDuplicates[index].indices
-			for j := len(duplicates) - 1; j >= 0; j-- {
-				if index := duplicates[j]; isConditionalImportRedundant(entry.conditions, wipOrder[index].conditions) {
-					if entry.kind != cssImportLayers {
-						// If an empty layer is followed immediately by a full layer and
-						// everything else is identical, then we don't need to emit the
-						// empty layer. For example:
-						//
-						//   @media screen {
-						//     @supports (display: grid) {
-						//       @layer foo;
-						//     }
-						//   }
-						//   @media screen {
-						//     @supports (display: grid) {
-						//       @layer foo {
-						//         div {
-						//           color: red;
-						//         }
-						//       }
-						//     }
-						//   }
-						//
-						// This can be improved by dropping the empty layer. But we can
-						// only do this if there's nothing in between these two rules.
-						if j == len(duplicates)-1 && index == len(wipOrder)-1 {
-							if other := wipOrder[index]; other.kind == cssImportLayers && importConditionsAreEqual(entry.conditions, other.conditions) {
-								// Remove the previous entry and then overwrite it below
-								duplicates = duplicates[:j]
-								wipOrder = wipOrder[:index]
-								break
-							}
-						}
+			conditionIndices := layerDuplicates[index].conditionIndices
+			if duplicateIndex := findLatestConditionalImportDuplicate(
+				entry.conditions, conditionIndices, duplicates, wipOrder,
+			); duplicateIndex != -1 {
+				wipIndex := duplicates[duplicateIndex]
+				if entry.kind == cssImportLayers {
+					// Don't add this to the duplicate list below because it's redundant
+					continue nextForward
+				}
 
-						// Non-layer entries still need to be present because they have
-						// other side effects beside inserting things in the layer order
-						wipOrder = append(wipOrder, entry)
+				// If an empty layer is followed immediately by a full layer and
+				// everything else is identical, then we don't need to emit the
+				// empty layer. For example:
+				//
+				//   @media screen {
+				//     @supports (display: grid) {
+				//       @layer foo;
+				//     }
+				//   }
+				//   @media screen {
+				//     @supports (display: grid) {
+				//       @layer foo {
+				//         div {
+				//           color: red;
+				//         }
+				//       }
+				//     }
+				//   }
+				//
+				// This can be improved by dropping the empty layer. But we can
+				// only do this if there's nothing in between these two rules.
+				replaceEmptyLayer := false
+				if duplicateIndex == len(duplicates)-1 && wipIndex == len(wipOrder)-1 {
+					if other := wipOrder[wipIndex]; other.kind == cssImportLayers && importConditionsAreEqual(entry.conditions, other.conditions) {
+						// Remove the previous entry and then overwrite it below
+						previousKey := makeConditionalImportConditionsKey(other.conditions)
+						previousIndices := conditionIndices[previousKey]
+						if len(previousIndices) == 1 {
+							delete(conditionIndices, previousKey)
+						} else {
+							conditionIndices[previousKey] = previousIndices[:len(previousIndices)-1]
+						}
+						duplicates = duplicates[:duplicateIndex]
+						wipOrder = wipOrder[:wipIndex]
+						replaceEmptyLayer = true
 					}
+				}
+				if !replaceEmptyLayer {
+					// Non-layer entries still need to be present because they have
+					// other side effects beside inserting things in the layer order
+					wipOrder = append(wipOrder, entry)
 
 					// Don't add this to the duplicate list below because it's redundant
 					continue nextForward
 				}
 			}
+			conditionKey := makeConditionalImportConditionsKey(entry.conditions)
+			conditionIndices[conditionKey] = append(conditionIndices[conditionKey], len(duplicates))
 			layerDuplicates[index].indices = append(duplicates, len(wipOrder))
 			wipOrder = append(wipOrder, entry)
 		}
@@ -3780,6 +3813,67 @@ func importConditionsAreEqual(a []css_ast.ImportConditions, b []css_ast.ImportCo
 		}
 	}
 	return true
+}
+
+type conditionalImportConditionsKey struct {
+	hash  uint32
+	count uint32
+}
+
+func makeConditionalImportConditionsKey(conditions []css_ast.ImportConditions) (key conditionalImportConditionsKey) {
+	key.count = uint32(len(conditions))
+	for _, conditions := range conditions {
+		key.hash = css_ast.HashTokens(key.hash, conditions.Layers)
+	}
+	return
+}
+
+func findLastIndexBefore(indices []int, before int) int {
+	first, last := 0, len(indices)
+	for first < last {
+		middle := first + (last-first)/2
+		if indices[middle] < before {
+			first = middle + 1
+		} else {
+			last = middle
+		}
+	}
+	if first == 0 {
+		return -1
+	}
+	return indices[first-1]
+}
+
+// This uses a hash of the layer-condition prefix to avoid checking imports
+// that cannot be redundant. The full predicate is still used to reject hash
+// collisions and to check the supports and media conditions.
+func findLatestConditionalImportDuplicate(
+	earlier []css_ast.ImportConditions,
+	conditionIndices map[conditionalImportConditionsKey][]int,
+	duplicates []int,
+	order []cssImportOrder,
+) int {
+	before := len(duplicates)
+	for {
+		duplicateIndex := -1
+		key := conditionalImportConditionsKey{}
+		for {
+			if indices := conditionIndices[key]; len(indices) > 0 {
+				if index := findLastIndexBefore(indices, before); index > duplicateIndex {
+					duplicateIndex = index
+				}
+			}
+			if int(key.count) == len(earlier) {
+				break
+			}
+			key.hash = css_ast.HashTokens(key.hash, earlier[key.count].Layers)
+			key.count++
+		}
+		if duplicateIndex == -1 || isConditionalImportRedundant(earlier, order[duplicates[duplicateIndex]].conditions) {
+			return duplicateIndex
+		}
+		before = duplicateIndex
+	}
 }
 
 // Given two "@import" rules for the same source index (an earlier one and a
