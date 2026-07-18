@@ -3894,6 +3894,7 @@ type conditionalImportFullConditionKey struct {
 
 type conditionalImportFullConditionIndexNode struct {
 	indices  []int
+	maxIndex int
 	children map[conditionalImportFullConditionKey]*conditionalImportFullConditionIndexNode
 }
 
@@ -3929,6 +3930,7 @@ func makeFullConditionalImportConditionKey(
 
 func (index *conditionalImportFullConditionIndex) append(conditions []css_ast.ImportConditions, duplicateIndex int) {
 	node := &index.root
+	node.maxIndex = duplicateIndex
 	for _, conditions := range conditions {
 		key := makeFullConditionalImportConditionKey(conditions, conditions.Supports, conditions.Queries)
 		if node.children == nil {
@@ -3936,10 +3938,11 @@ func (index *conditionalImportFullConditionIndex) append(conditions []css_ast.Im
 		}
 		child := node.children[key]
 		if child == nil {
-			child = &conditionalImportFullConditionIndexNode{}
+			child = &conditionalImportFullConditionIndexNode{maxIndex: -1}
 			node.children[key] = child
 		}
 		node = child
+		node.maxIndex = duplicateIndex
 	}
 	node.indices = append(node.indices, duplicateIndex)
 }
@@ -3959,6 +3962,15 @@ func (node *conditionalImportFullConditionIndexNode) remove(conditions []css_ast
 			delete(node.children, key)
 		}
 	}
+	node.maxIndex = -1
+	if len(node.indices) > 0 {
+		node.maxIndex = node.indices[len(node.indices)-1]
+	}
+	for _, child := range node.children {
+		if child.maxIndex > node.maxIndex {
+			node.maxIndex = child.maxIndex
+		}
+	}
 	return len(node.indices) == 0 && len(node.children) == 0
 }
 
@@ -3972,43 +3984,11 @@ func makeConditionalImportConditionIndices(indices []int, order []cssImportOrder
 }
 
 func makeFullConditionalImportConditionIndex(indices []int, order []cssImportOrder) *conditionalImportFullConditionIndex {
-	conditionIndices := &conditionalImportFullConditionIndex{}
+	conditionIndices := &conditionalImportFullConditionIndex{root: conditionalImportFullConditionIndexNode{maxIndex: -1}}
 	for i, index := range indices {
 		conditionIndices.append(order[index].conditions, i)
 	}
 	return conditionIndices
-}
-
-// This visits only populated condition-trie edges that can satisfy the
-// redundancy predicate. The full predicate remains the collision and semantic
-// check at the selected duplicate.
-func forEachCompatibleFullConditionalImportConditionKey(
-	conditions css_ast.ImportConditions,
-	visit func(conditionalImportFullConditionKey),
-) {
-	visit(makeFullConditionalImportConditionKey(conditions, conditions.Supports, conditions.Queries))
-	if len(conditions.Supports) > 0 {
-		visit(makeFullConditionalImportConditionKey(conditions, nil, conditions.Queries))
-	}
-	if len(conditions.Queries) > 0 {
-		visit(makeFullConditionalImportConditionKey(conditions, conditions.Supports, nil))
-	}
-}
-
-func findLastIndexBefore(indices []int, before int) int {
-	first, last := 0, len(indices)
-	for first < last {
-		middle := first + (last-first)/2
-		if indices[middle] < before {
-			first = middle + 1
-		} else {
-			last = middle
-		}
-	}
-	if first == 0 {
-		return -1
-	}
-	return indices[first-1]
 }
 
 // This uses a hash of the layer-condition prefix to avoid checking imports
@@ -4050,45 +4030,86 @@ func findLatestFullConditionalImportDuplicate(
 	duplicates []int,
 	order []cssImportOrder,
 ) int {
-	nodes := []*conditionalImportFullConditionIndexNode{&conditionIndices.root}
-	var candidateNodes []*conditionalImportFullConditionIndexNode
-
-	for depth := 0; ; depth++ {
-		for _, node := range nodes {
-			if len(node.indices) > 0 {
-				candidateNodes = append(candidateNodes, node)
-			}
-		}
-		if depth == len(earlier) || len(nodes) == 0 {
-			break
-		}
-
-		next := make([]*conditionalImportFullConditionIndexNode, 0, len(nodes)*3)
-		seen := make(map[*conditionalImportFullConditionIndexNode]bool, len(nodes)*3)
-		for _, node := range nodes {
-			forEachCompatibleFullConditionalImportConditionKey(earlier[depth], func(key conditionalImportFullConditionKey) {
-				if child := node.children[key]; child != nil && !seen[child] {
-					seen[child] = true
-					next = append(next, child)
-				}
-			})
-		}
-		nodes = next
+	duplicateIndex := findLatestFullConditionalImportDuplicateInTrie(earlier, &conditionIndices.root, 0)
+	if duplicateIndex == -1 || isConditionalImportRedundant(earlier, order[duplicates[duplicateIndex]].conditions) {
+		return duplicateIndex
 	}
 
-	before := len(duplicates)
-	for {
-		duplicateIndex := -1
-		for _, node := range candidateNodes {
-			if index := findLastIndexBefore(node.indices, before); index > duplicateIndex {
-				duplicateIndex = index
-			}
-		}
-		if duplicateIndex == -1 || isConditionalImportRedundant(earlier, order[duplicates[duplicateIndex]].conditions) {
+	// The trie is keyed by hashes, so only a collision falls back to the
+	// original directional scan. Normal lookups descend just one highest-index
+	// compatible branch instead of materializing the whole condition frontier.
+	for duplicateIndex--; duplicateIndex >= 0; duplicateIndex-- {
+		if isConditionalImportRedundant(earlier, order[duplicates[duplicateIndex]].conditions) {
 			return duplicateIndex
 		}
-		before = duplicateIndex
 	}
+	return -1
+}
+
+func findLatestFullConditionalImportDuplicateInTrie(
+	earlier []css_ast.ImportConditions,
+	node *conditionalImportFullConditionIndexNode,
+	depth int,
+) int {
+	duplicateIndex := -1
+	if len(node.indices) > 0 {
+		duplicateIndex = node.indices[len(node.indices)-1]
+	}
+	if depth == len(earlier) {
+		return duplicateIndex
+	}
+
+	condition := earlier[depth]
+	keys := [3]conditionalImportFullConditionKey{
+		makeFullConditionalImportConditionKey(condition, condition.Supports, condition.Queries),
+	}
+	keyCount := 1
+	if len(condition.Supports) > 0 {
+		keys[keyCount] = makeFullConditionalImportConditionKey(condition, nil, condition.Queries)
+		keyCount++
+	}
+	if len(condition.Queries) > 0 {
+		keys[keyCount] = makeFullConditionalImportConditionKey(condition, condition.Supports, nil)
+		keyCount++
+	}
+
+	var children [3]*conditionalImportFullConditionIndexNode
+	childCount := 0
+	for _, key := range keys[:keyCount] {
+		if child := node.children[key]; child != nil {
+			isDuplicate := false
+			for _, previous := range children[:childCount] {
+				if child == previous {
+					isDuplicate = true
+					break
+				}
+			}
+			if !isDuplicate {
+				children[childCount] = child
+				childCount++
+			}
+		}
+	}
+
+	for childCount > 0 {
+		bestChild := 0
+		for i := 1; i < childCount; i++ {
+			if children[i].maxIndex > children[bestChild].maxIndex {
+				bestChild = i
+			}
+		}
+		child := children[bestChild]
+		childCount--
+		children[bestChild] = children[childCount]
+		if child.maxIndex <= duplicateIndex {
+			break
+		}
+		if index := findLatestFullConditionalImportDuplicateInTrie(earlier, child, depth+1); index > duplicateIndex {
+			duplicateIndex = index
+		}
+	}
+
+	return duplicateIndex
 }
 
 // Given two "@import" rules for the same source index (an earlier one and a
