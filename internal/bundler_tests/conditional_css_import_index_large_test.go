@@ -8,11 +8,12 @@ import (
 	"github.com/evanw/esbuild/internal/test"
 )
 
-// This has 64 non-redundant entries before the target conditions, so the
+// This has 128 non-redundant entries before the target conditions, so the
 // final target imports exercise lookup through cssImportConditionsIndex.
 func TestConditionalCSSImportIndexLargeGroupOutput(t *testing.T) {
+	const count = 128
 	var entry strings.Builder
-	for i := 0; i < 64; i++ {
+	for i := 0; i < count; i++ {
 		fmt.Fprintf(&entry, "@import \"https://example.com/shared.css\" layer(external-%d);\n", i)
 	}
 	entry.WriteString(`@import "https://example.com/shared.css" layer(external-target) supports(display: grid) screen;
@@ -20,7 +21,7 @@ func TestConditionalCSSImportIndexLargeGroupOutput(t *testing.T) {
 @import "https://example.com/shared.css" layer(external-target) supports(display: grid);
 @import "https://example.com/shared.css" layer(external-target) supports(display: grid);
 `)
-	for i := 0; i < 64; i++ {
+	for i := 0; i < count; i++ {
 		fmt.Fprintf(&entry, "@import \"./shared.css\" layer(l%d);\n", i)
 	}
 	entry.WriteString(`@import "./shared.css" layer(target) supports(display: grid) screen;
@@ -35,7 +36,7 @@ func TestConditionalCSSImportIndexLargeGroupOutput(t *testing.T) {
 	}))
 
 	var expected strings.Builder
-	for i := 0; i < 64; i++ {
+	for i := 0; i < count; i++ {
 		fmt.Fprintf(&expected, "@import \"https://example.com/shared.css\" layer(external-%d);\n", i)
 	}
 	expected.WriteString(`@media screen {
@@ -47,7 +48,7 @@ func TestConditionalCSSImportIndexLargeGroupOutput(t *testing.T) {
 @import "https://example.com/shared.css" layer(external-target) supports(display: grid);
 
 `)
-	for i := 0; i < 64; i++ {
+	for i := 0; i < count; i++ {
 		fmt.Fprintf(&expected, `/* shared.css */
 @layer l%d {
   .shared {
@@ -55,7 +56,7 @@ func TestConditionalCSSImportIndexLargeGroupOutput(t *testing.T) {
   }
 }
 `, i)
-		if i+1 < 64 {
+		if i+1 < count {
 			expected.WriteByte('\n')
 		}
 	}
@@ -88,7 +89,11 @@ func TestConditionalCSSImportIndexLargeGroupOutput(t *testing.T) {
 	test.AssertEqualWithDiff(t, got, expected.String())
 }
 
+// This puts nested imports before 129 direct imports in source order. The
+// backward duplicate pass indexes the direct entries first and then must return
+// to the scan when it reaches the nested entries.
 func TestConditionalCSSImportIndexLargeNestedGroupOutput(t *testing.T) {
+	const directCount = 129
 	files := map[string]string{"/shared.css": `.shared { color: black }`}
 	var entry strings.Builder
 	for i := 0; i < 64; i++ {
@@ -102,6 +107,9 @@ func TestConditionalCSSImportIndexLargeNestedGroupOutput(t *testing.T) {
 	files["/outer-screen.css"] = `@import "./shared.css" layer(inner-target) screen;`
 	files["/outer-supports-a.css"] = `@import "./shared.css" layer(inner-target) supports(display: grid);`
 	files["/outer-supports-b.css"] = `@import "./shared.css" layer(inner-target) supports(display: grid);`
+	for i := 0; i < directCount; i++ {
+		fmt.Fprintf(&entry, "@import \"./shared.css\" layer(direct-%d);\n", i)
+	}
 	files["/entry.css"] = entry.String()
 
 	got := compileConditionalCSSImportBundle(t, makeConditionalCSSImportBundle(t, files))
@@ -166,6 +174,20 @@ func TestConditionalCSSImportIndexLargeNestedGroupOutput(t *testing.T) {
 /* outer-supports-b.css */
 @layer outer-target;
 
+`)
+	for i := 0; i < directCount; i++ {
+		fmt.Fprintf(&expected, `/* shared.css */
+@layer direct-%d {
+  .shared {
+    color: black;
+  }
+}
+`, i)
+		if i+1 < directCount {
+			expected.WriteByte('\n')
+		}
+	}
+	expected.WriteString(`
 /* entry.css */
 `)
 	test.AssertEqualWithDiff(t, got, expected.String())

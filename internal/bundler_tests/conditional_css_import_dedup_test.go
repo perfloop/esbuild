@@ -130,7 +130,7 @@ func TestConditionalCSSImportDeduplication(t *testing.T) {
 	test.AssertEqualWithDiff(t, got, expected)
 }
 
-func benchmarkConditionalCSSImportDeduplication(b *testing.B, count int, distinctLayers bool) {
+func conditionalCSSImportDeduplicationFiles(count int, distinctLayers bool) map[string]string {
 	var entry strings.Builder
 	for i := 0; i < count; i++ {
 		layerName := "shared"
@@ -139,24 +139,14 @@ func benchmarkConditionalCSSImportDeduplication(b *testing.B, count int, distinc
 		}
 		fmt.Fprintf(&entry, "@import \"./shared.css\" layer(%s);\n", layerName)
 	}
-
-	bundle := makeConditionalCSSImportBundle(b, map[string]string{
+	return map[string]string{
 		"/entry.css":  entry.String(),
 		"/shared.css": ".shared { color: black }",
-	})
-	want := compileConditionalCSSImportBundle(b, bundle)
-
-	b.ReportAllocs()
-	b.ResetTimer()
-	var got string
-	for i := 0; i < b.N; i++ {
-		got = compileConditionalCSSImportBundle(b, bundle)
 	}
-	b.StopTimer()
+}
 
-	if got != want {
-		b.Fatal("bundled CSS changed across repeated compiles")
-	}
+func benchmarkConditionalCSSImportDeduplication(b *testing.B, count int, distinctLayers bool) {
+	benchmarkConditionalCSSImportIndex(b, conditionalCSSImportDeduplicationFiles(count, distinctLayers))
 }
 
 func BenchmarkConditionalCSSImportDeduplication(b *testing.B) {

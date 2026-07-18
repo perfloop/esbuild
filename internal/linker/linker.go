@@ -3383,11 +3383,16 @@ type cssImportOrder struct {
 
 // This index avoids comparing condition tokens that cannot make an import
 // redundant. It is deliberately limited to imports with at most one wrapping
-// condition, which is the common direct-import case. Nested conditions retain
-// the existing scan to avoid adding a second traversal strategy for them.
+// condition. Nested conditions retain the existing scan instead of needing a
+// second traversal strategy. The original scan also avoids allocating index
+// state for short direct-condition groups.
+const cssImportConditionsIndexMinEntries = 128
+
 type cssImportConditionsIndex struct {
-	entries    map[uint32]int32
-	collisions map[uint32][]int32
+	// This is sorted by hashCSSImportConditionsForSlice. Moving the existing
+	// duplicate slice here avoids allocating a second per-group hash table.
+	indices []int
+	latest  int
 }
 
 func hashCSSImportConditions(condition css_ast.ImportConditions) uint32 {
@@ -3396,41 +3401,103 @@ func hashCSSImportConditions(condition css_ast.ImportConditions) uint32 {
 	return css_ast.HashMediaQueries(hash, condition.Queries)
 }
 
-func (index *cssImportConditionsIndex) add(conditions []css_ast.ImportConditions, orderIndex int, order []cssImportOrder) {
-	hash := uint32(0)
+func hashCSSImportConditionsForSlice(conditions []css_ast.ImportConditions) uint32 {
 	if len(conditions) == 1 {
-		hash = hashCSSImportConditions(conditions[0])
+		return hashCSSImportConditions(conditions[0])
 	}
-	if index.entries == nil {
-		index.entries = make(map[uint32]int32)
+	return 0
+}
+
+func newCSSImportConditionsIndex(indices []int, order []cssImportOrder) *cssImportConditionsIndex {
+	index := &cssImportConditionsIndex{indices: indices, latest: -1}
+
+	// Insertion-sort the small initial group without allocating a second slice.
+	for i := 1; i < len(index.indices); i++ {
+		orderIndex := index.indices[i]
+		hash := hashCSSImportConditionsForSlice(order[orderIndex].conditions)
+		j := i
+		for j > 0 {
+			previousIndex := index.indices[j-1]
+			if hashCSSImportConditionsForSlice(order[previousIndex].conditions) <= hash {
+				break
+			}
+			index.indices[j] = previousIndex
+			j--
+		}
+		index.indices[j] = orderIndex
 	}
-	if previousIndex, ok := index.entries[hash]; ok {
+	for _, orderIndex := range index.indices {
+		if orderIndex > index.latest {
+			index.latest = orderIndex
+		}
+	}
+	return index
+}
+
+func (index *cssImportConditionsIndex) firstWithHash(hash uint32, order []cssImportOrder) int {
+	return sort.Search(len(index.indices), func(i int) bool {
+		return hashCSSImportConditionsForSlice(order[index.indices[i]].conditions) >= hash
+	})
+}
+
+func (index *cssImportConditionsIndex) add(conditions []css_ast.ImportConditions, orderIndex int, order []cssImportOrder) {
+	hash := hashCSSImportConditionsForSlice(conditions)
+	first := index.firstWithHash(hash, order)
+	for i := first; i < len(index.indices); i++ {
+		previousIndex := index.indices[i]
+		if hashCSSImportConditionsForSlice(order[previousIndex].conditions) != hash {
+			break
+		}
 		if importConditionsAreEqual(conditions, order[previousIndex].conditions) {
-			if orderIndex > int(previousIndex) {
-				index.entries[hash] = int32(orderIndex)
+			if orderIndex > previousIndex {
+				index.indices[i] = orderIndex
+			}
+			if orderIndex > index.latest {
+				index.latest = orderIndex
 			}
 			return
 		}
-		if index.collisions == nil {
-			index.collisions = make(map[uint32][]int32)
-		}
-		index.collisions[hash] = append(index.collisions[hash], int32(orderIndex))
-		return
 	}
-	index.entries[hash] = int32(orderIndex)
+	index.indices = append(index.indices, 0)
+	copy(index.indices[first+1:], index.indices[first:len(index.indices)-1])
+	index.indices[first] = orderIndex
+	if orderIndex > index.latest {
+		index.latest = orderIndex
+	}
+}
+
+func (index *cssImportConditionsIndex) remove(conditions []css_ast.ImportConditions, orderIndex int, order []cssImportOrder) {
+	hash := hashCSSImportConditionsForSlice(conditions)
+	first := index.firstWithHash(hash, order)
+	for i := first; i < len(index.indices); i++ {
+		previousIndex := index.indices[i]
+		if hashCSSImportConditionsForSlice(order[previousIndex].conditions) != hash {
+			break
+		}
+		if previousIndex == orderIndex {
+			copy(index.indices[i:], index.indices[i+1:])
+			index.indices = index.indices[:len(index.indices)-1]
+			break
+		}
+	}
+	index.latest = -1
+	for _, previousIndex := range index.indices {
+		if previousIndex > index.latest {
+			index.latest = previousIndex
+		}
+	}
 }
 
 func (index *cssImportConditionsIndex) findRedundant(earlier []css_ast.ImportConditions, order []cssImportOrder) (int, bool) {
 	latest := -1
 	visit := func(hash uint32) {
-		if orderIndex, ok := index.entries[hash]; ok {
-			if int(orderIndex) > latest && isConditionalImportRedundant(earlier, order[orderIndex].conditions) {
-				latest = int(orderIndex)
+		for i := index.firstWithHash(hash, order); i < len(index.indices); i++ {
+			orderIndex := index.indices[i]
+			if hashCSSImportConditionsForSlice(order[orderIndex].conditions) != hash {
+				break
 			}
-		}
-		for _, orderIndex := range index.collisions[hash] {
-			if int(orderIndex) > latest && isConditionalImportRedundant(earlier, order[orderIndex].conditions) {
-				latest = int(orderIndex)
+			if orderIndex > latest && isConditionalImportRedundant(earlier, order[orderIndex].conditions) {
+				latest = orderIndex
 			}
 		}
 	}
@@ -3470,46 +3537,34 @@ var cssImportConditionsIndexDisabled = &cssImportConditionsIndex{}
 func addCSSImportDuplicateIndex(
 	duplicates cssImportDuplicateIndex,
 	conditionIndex *cssImportConditionsIndex,
-	conditions []css_ast.ImportConditions,
+	hasNestedConditions bool,
 	orderIndex int,
 	order []cssImportOrder,
 ) (cssImportDuplicateIndex, *cssImportConditionsIndex) {
 	if conditionIndex == nil && len(duplicates.indices) == 1 && len(order[duplicates.indices[0]].conditions) > 1 {
 		conditionIndex = cssImportConditionsIndexDisabled
 	}
-	if len(conditions) > 1 {
-		if len(duplicates.indices) > 0 {
-			conditionIndex = cssImportConditionsIndexDisabled
-		}
-	} else if conditionIndex != cssImportConditionsIndexDisabled {
+	if hasNestedConditions && conditionIndex != cssImportConditionsIndexDisabled && (conditionIndex != nil || len(duplicates.indices) > 0) {
 		if conditionIndex != nil {
-			conditionIndex.add(conditions, orderIndex, order)
-		} else if len(duplicates.indices) == 1 {
-			index := &cssImportConditionsIndex{}
-			previousIndex := duplicates.indices[0]
-			index.add(order[previousIndex].conditions, previousIndex, order)
-			index.add(conditions, orderIndex, order)
-			conditionIndex = index
+			sort.Ints(conditionIndex.indices)
+			duplicates.indices = conditionIndex.indices
 		}
+		conditionIndex = cssImportConditionsIndexDisabled
 	}
 	duplicates.indices = append(duplicates.indices, orderIndex)
 	return duplicates, conditionIndex
 }
 
-func resetCSSImportDuplicateIndex(duplicates cssImportDuplicateIndex, order []cssImportOrder) *cssImportConditionsIndex {
-	for _, orderIndex := range duplicates.indices {
-		if len(order[orderIndex].conditions) > 1 {
-			return cssImportConditionsIndexDisabled
-		}
+func startCSSImportConditionsIndex(
+	duplicates cssImportDuplicateIndex,
+	conditionIndex *cssImportConditionsIndex,
+	order []cssImportOrder,
+) (cssImportDuplicateIndex, *cssImportConditionsIndex) {
+	if conditionIndex == nil && len(duplicates.indices) > cssImportConditionsIndexMinEntries {
+		conditionIndex = newCSSImportConditionsIndex(duplicates.indices, order)
+		duplicates.indices = nil
 	}
-	if len(duplicates.indices) > 1 {
-		index := &cssImportConditionsIndex{}
-		for _, orderIndex := range duplicates.indices {
-			index.add(order[orderIndex].conditions, orderIndex, order)
-		}
-		return index
-	}
-	return nil
+	return duplicates, conditionIndex
 }
 
 // CSS files are traversed in depth-first postorder just like JavaScript. But
@@ -3721,7 +3776,12 @@ func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order
 						}
 					}
 				}
-				duplicates, conditionIndex = addCSSImportDuplicateIndex(duplicates, conditionIndex, entry.conditions, i, order)
+				if conditionIndex != nil && conditionIndex != cssImportConditionsIndexDisabled && len(entry.conditions) <= 1 {
+					conditionIndex.add(entry.conditions, i, order)
+				} else {
+					duplicates, conditionIndex = addCSSImportDuplicateIndex(duplicates, conditionIndex, len(entry.conditions) > 1, i, order)
+					duplicates, conditionIndex = startCSSImportConditionsIndex(duplicates, conditionIndex, order)
+				}
 				sourceIndexDuplicates[entry.sourceIndex] = duplicates
 				if conditionIndex != nil {
 					if sourceIndexConditions == nil {
@@ -3754,7 +3814,12 @@ func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order
 						}
 					}
 				}
-				duplicates, conditionIndex = addCSSImportDuplicateIndex(duplicates, conditionIndex, entry.conditions, i, order)
+				if conditionIndex != nil && conditionIndex != cssImportConditionsIndexDisabled && len(entry.conditions) <= 1 {
+					conditionIndex.add(entry.conditions, i, order)
+				} else {
+					duplicates, conditionIndex = addCSSImportDuplicateIndex(duplicates, conditionIndex, len(entry.conditions) > 1, i, order)
+					duplicates, conditionIndex = startCSSImportConditionsIndex(duplicates, conditionIndex, order)
+				}
 				externalPathDuplicates[entry.externalPath] = duplicates
 				if conditionIndex != nil {
 					if externalPathConditions == nil {
@@ -3868,7 +3933,7 @@ func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order
 			conditionIndex := layerConditions[index]
 			if conditionIndex == nil || conditionIndex == cssImportConditionsIndexDisabled {
 				// Avoid constructing or consulting the condition index until this
-				// group has multiple non-redundant entries.
+				// group has enough non-redundant entries to amortize it.
 				duplicateIndices := duplicates.indices
 				for j := len(duplicateIndices) - 1; j >= 0; j-- {
 					if duplicateIndex := duplicateIndices[j]; isConditionalImportRedundant(entry.conditions, wipOrder[duplicateIndex].conditions) {
@@ -3915,12 +3980,11 @@ func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order
 				duplicates.indices = duplicateIndices
 			} else if duplicateIndex, ok := conditionIndex.findRedundant(entry.conditions, wipOrder); ok {
 				if entry.kind != cssImportLayers {
-					if duplicateIndex == duplicates.indices[len(duplicates.indices)-1] && duplicateIndex == len(wipOrder)-1 {
+					if duplicateIndex == conditionIndex.latest && duplicateIndex == len(wipOrder)-1 {
 						if other := wipOrder[duplicateIndex]; other.kind == cssImportLayers && importConditionsAreEqual(entry.conditions, other.conditions) {
 							// Remove the previous entry and then overwrite it below
-							duplicates.indices = duplicates.indices[:len(duplicates.indices)-1]
+							conditionIndex.remove(other.conditions, duplicateIndex, wipOrder)
 							wipOrder = wipOrder[:duplicateIndex]
-							conditionIndex = resetCSSImportDuplicateIndex(duplicates.cssImportDuplicateIndex, wipOrder)
 						} else {
 							// Non-layer entries still need to be present because they have
 							// other side effects beside inserting things in the layer order
@@ -3938,7 +4002,14 @@ func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order
 					continue nextForward
 				}
 			}
-			duplicates.cssImportDuplicateIndex, conditionIndex = addCSSImportDuplicateIndex(duplicates.cssImportDuplicateIndex, conditionIndex, entry.conditions, len(wipOrder), wipOrder)
+			if conditionIndex != nil && conditionIndex != cssImportConditionsIndexDisabled && len(entry.conditions) <= 1 {
+				conditionIndex.add(entry.conditions, len(wipOrder), wipOrder)
+				wipOrder = append(wipOrder, entry)
+			} else {
+				duplicates.cssImportDuplicateIndex, conditionIndex = addCSSImportDuplicateIndex(duplicates.cssImportDuplicateIndex, conditionIndex, len(entry.conditions) > 1, len(wipOrder), wipOrder)
+				wipOrder = append(wipOrder, entry)
+				duplicates.cssImportDuplicateIndex, conditionIndex = startCSSImportConditionsIndex(duplicates.cssImportDuplicateIndex, conditionIndex, wipOrder)
+			}
 			if conditionIndex != nil {
 				if layerConditions == nil {
 					layerConditions = make(map[int]*cssImportConditionsIndex)
@@ -3947,7 +4018,6 @@ func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order
 			} else if layerConditions != nil {
 				delete(layerConditions, index)
 			}
-			wipOrder = append(wipOrder, entry)
 		}
 
 		order, wipOrder = wipOrder, order[:0]

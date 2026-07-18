@@ -34,11 +34,8 @@ func BenchmarkConditionalCSSImportIndexThreshold(b *testing.B) {
 		b.Run(fmt.Sprintf("internal-distinct-%d", count), func(b *testing.B) {
 			benchmarkConditionalCSSImportIndex(b, conditionalCSSImportIndexThresholdInternal(count, true))
 		})
-		b.Run(fmt.Sprintf("external-distinct-%d", count), func(b *testing.B) {
-			benchmarkConditionalCSSImportIndex(b, conditionalCSSImportIndexThresholdExternal(count))
-		})
 	}
-	b.Run("internal-compatible-66", func(b *testing.B) {
-		benchmarkConditionalCSSImportIndex(b, conditionalCSSImportIndexThresholdInternal(66, false))
+	b.Run("external-distinct-63", func(b *testing.B) {
+		benchmarkConditionalCSSImportIndex(b, conditionalCSSImportIndexThresholdExternal(63))
 	})
 }
