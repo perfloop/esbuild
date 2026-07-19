@@ -1647,6 +1647,17 @@ TestCSSAtImportExternal
 /* entry.css */
 
 ================================================================================
+TestCSSAtImportExternalLayerConditionDedup
+---------- /out.css ----------
+@layer alpha;
+@import "https://example.com/shared.css" layer(beta);
+@import "https://example.com/shared.css" layer(alpha.inner);
+@import "https://example.com/shared.css" layer(alpha);
+@import "https://example.com/shared.css" layer(gamma);
+
+/* entry.css */
+
+================================================================================
 TestCSSAtLayerBeforeImportBundle
 ---------- /out/entry.css ----------
 @layer layer1, layer2.layer3;

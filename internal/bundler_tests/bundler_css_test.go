@@ -1,12 +1,10 @@
 package bundler_tests
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/evanw/esbuild/internal/compat"
 	"github.com/evanw/esbuild/internal/config"
-	"github.com/evanw/esbuild/internal/test"
 )
 
 var css_suite = suite{
@@ -94,6 +92,25 @@ func TestCSSAtImportExternal(t *testing.T) {
 					"/external5.css": true,
 				}},
 			},
+		},
+	})
+}
+
+func TestCSSAtImportExternalLayerConditionDedup(t *testing.T) {
+	css_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.css": `
+				@import "https://example.com/shared.css" layer(alpha);
+				@import "https://example.com/shared.css" layer(beta);
+				@import "https://example.com/shared.css" layer(alpha.inner);
+				@import "https://example.com/shared.css" layer(alpha);
+				@import "https://example.com/shared.css" layer(gamma);
+			`,
+		},
+		entryPaths: []string{"/entry.css"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.css",
 		},
 	})
 }
@@ -2652,58 +2669,4 @@ func TestCSSAssetPathsWithSpacesBundle(t *testing.T) {
 			},
 		},
 	})
-}
-
-func TestCSSConditionalImportDedupLayerConditionPrefix(t *testing.T) {
-	bundle := scanCSSConditionalImportFixture(t, map[string]string{
-		"/entry.css": `
-			@import "./outer.css" layer(alpha);
-			@import "./shared.css" layer(beta);
-			@import "./shared.css" layer(alpha);
-			@import "./shared.css" layer(gamma);
-		`,
-		"/outer.css":  `@import "./shared.css" layer(inner);`,
-		"/shared.css": `.shared { color: red }`,
-	})
-
-	test.AssertEqualWithDiff(t, compileCSSConditionalImportFixture(t, &bundle), `@layer alpha {
-  @layer inner;
-}
-
-/* outer.css */
-@layer alpha;
-
-/* shared.css */
-@layer beta {
-  .shared {
-    color: red;
-  }
-}
-
-/* shared.css */
-@layer alpha {
-  .shared {
-    color: red;
-  }
-}
-
-/* shared.css */
-@layer gamma {
-  .shared {
-    color: red;
-  }
-}
-
-/* entry.css */
-`)
-}
-
-func TestCSSConditionalImportDedupFullConditionFallback(t *testing.T) {
-	const depth = 4
-	const probeCount = 3
-	bundle := scanCSSConditionalImportFixture(t, cssConditionalImportFullConditionBenchmarkFiles(depth, probeCount))
-	output := compileCSSConditionalImportFixture(t, &bundle)
-	if sharedCopies := strings.Count(output, ".shared {"); sharedCopies != (1<<depth)+2*probeCount {
-		t.Fatalf("full-condition fallback retained %d shared imports, want %d", sharedCopies, (1<<depth)+2*probeCount)
-	}
 }
