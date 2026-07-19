@@ -98,6 +98,29 @@ func TestCSSAtImportExternal(t *testing.T) {
 	})
 }
 
+func TestCSSAtImportExternalLayerConditions(t *testing.T) {
+	css_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.css": `
+				@import "./shared.css" layer(alpha);
+				@import "./shared.css" layer(beta);
+				@import "./shared.css" layer(alpha);
+				@import "./shared.css" layer(gamma);
+			`,
+		},
+		entryPaths: []string{"/entry.css"},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			AbsOutputDir: "/out",
+			ExternalSettings: config.ExternalSettings{
+				PostResolve: config.ExternalMatchers{Exact: map[string]bool{
+					"/shared.css": true,
+				}},
+			},
+		},
+	})
+}
+
 func TestCSSAtImport(t *testing.T) {
 	css_suite.expectBundled(t, bundled{
 		files: map[string]string{

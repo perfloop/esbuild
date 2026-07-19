@@ -1690,6 +1690,16 @@ TestCSSAtImportExternal
 /* entry.css */
 
 ================================================================================
+TestCSSAtImportExternalLayerConditions
+---------- /out/entry.css ----------
+@layer alpha;
+@import "../shared.css" layer(beta);
+@import "../shared.css" layer(alpha);
+@import "../shared.css" layer(gamma);
+
+/* entry.css */
+
+================================================================================
 TestCSSAtLayerBeforeImportBundle
 ---------- /out/entry.css ----------
 @layer layer1, layer2.layer3;
