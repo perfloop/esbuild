@@ -151,6 +151,128 @@ TestCSSAtImport
 }
 
 ================================================================================
+TestCSSAtImportConditionPrefixes
+---------- /out.css ----------
+@media screen {
+  @supports (display: grid) {
+    @layer alpha {
+      @media (min-width: 1px) {
+        @supports (color: red) {
+          @layer inner;
+        }
+      }
+    }
+  }
+}
+@media screen {
+  @supports (display: grid) {
+    @layer alpha;
+  }
+}
+
+/* shared.css */
+@media screen {
+  @supports (display: grid) {
+    @layer alpha {
+      @media (min-width: 1px) {
+        @supports (color: red) {
+          @layer inner {
+            .shared {
+              color: red;
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+/* exact.css */
+@media screen {
+  @supports (display: grid) {
+    @layer alpha;
+  }
+}
+@media screen {
+  @supports (display: grid) {
+    @layer beta {
+      @media (min-width: 1px) {
+        @supports (color: red) {
+          @layer inner;
+        }
+      }
+    }
+  }
+}
+
+/* supports-a.css */
+@media screen {
+  @supports (display: grid) {
+    @layer beta;
+  }
+}
+
+/* shared.css */
+@media screen {
+  @layer beta {
+    @media (min-width: 1px) {
+      @supports (color: red) {
+        @layer inner {
+          .shared {
+            color: red;
+          }
+        }
+      }
+    }
+  }
+}
+
+/* supports-b.css */
+@media screen {
+  @layer beta;
+}
+@media screen {
+  @supports (display: grid) {
+    @layer gamma {
+      @media (min-width: 1px) {
+        @supports (color: red) {
+          @layer inner;
+        }
+      }
+    }
+  }
+}
+
+/* media-a.css */
+@media screen {
+  @supports (display: grid) {
+    @layer gamma;
+  }
+}
+
+/* shared.css */
+@supports (display: grid) {
+  @layer gamma {
+    @media (min-width: 1px) {
+      @supports (color: red) {
+        @layer inner {
+          .shared {
+            color: red;
+          }
+        }
+      }
+    }
+  }
+}
+
+/* media-b.css */
+@supports (display: grid) {
+  @layer gamma;
+}
+
+/* entry.css */
+
+================================================================================
 TestCSSAtImportConditionsAtLayerBundle
 ---------- /out/case1.css ----------
 @layer first.one;
@@ -1686,16 +1808,6 @@ TestCSSAtImportExternal
 .after {
   color: blue;
 }
-
-/* entry.css */
-
-================================================================================
-TestCSSAtImportExternalLayerConditions
----------- /out/entry.css ----------
-@layer alpha;
-@import "../shared.css" layer(beta);
-@import "../shared.css" layer(alpha);
-@import "../shared.css" layer(gamma);
 
 /* entry.css */
 

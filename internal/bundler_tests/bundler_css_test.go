@@ -98,29 +98,6 @@ func TestCSSAtImportExternal(t *testing.T) {
 	})
 }
 
-func TestCSSAtImportExternalLayerConditions(t *testing.T) {
-	css_suite.expectBundled(t, bundled{
-		files: map[string]string{
-			"/entry.css": `
-				@import "./shared.css" layer(alpha);
-				@import "./shared.css" layer(beta);
-				@import "./shared.css" layer(alpha);
-				@import "./shared.css" layer(gamma);
-			`,
-		},
-		entryPaths: []string{"/entry.css"},
-		options: config.Options{
-			Mode:         config.ModeBundle,
-			AbsOutputDir: "/out",
-			ExternalSettings: config.ExternalSettings{
-				PostResolve: config.ExternalMatchers{Exact: map[string]bool{
-					"/shared.css": true,
-				}},
-			},
-		},
-	})
-}
-
 func TestCSSAtImport(t *testing.T) {
 	css_suite.expectBundled(t, bundled{
 		files: map[string]string{
@@ -140,6 +117,42 @@ func TestCSSAtImport(t *testing.T) {
 			"/shared.css": `
 				.shared { color: black }
 			`,
+		},
+		entryPaths: []string{"/entry.css"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.css",
+		},
+	})
+}
+
+func TestCSSAtImportConditionPrefixes(t *testing.T) {
+	css_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.css": `
+				@import "./exact.css" layer(alpha) supports(display: grid) screen;
+				@import "./exact.css" layer(alpha) supports(display: grid) screen;
+				@import "./supports-a.css" layer(beta) supports(display: grid) screen;
+				@import "./supports-b.css" layer(beta) screen;
+				@import "./media-a.css" layer(gamma) supports(display: grid) screen;
+				@import "./media-b.css" layer(gamma) supports(display: grid);
+			`,
+			"/exact.css": `
+				@import "./shared.css" layer(inner) supports(color: red) (min-width: 1px);
+			`,
+			"/supports-a.css": `
+				@import "./shared.css" layer(inner) supports(color: red) (min-width: 1px);
+			`,
+			"/supports-b.css": `
+				@import "./shared.css" layer(inner) supports(color: red) (min-width: 1px);
+			`,
+			"/media-a.css": `
+				@import "./shared.css" layer(inner) supports(color: red) (min-width: 1px);
+			`,
+			"/media-b.css": `
+				@import "./shared.css" layer(inner) supports(color: red) (min-width: 1px);
+			`,
+			"/shared.css": `.shared { color: red }`,
 		},
 		entryPaths: []string{"/entry.css"},
 		options: config.Options{

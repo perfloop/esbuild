@@ -3678,9 +3678,8 @@ func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order
 	// copy instead of the last copy like other things in CSS.
 	{
 		type duplicateEntry struct {
-			layers          [][]string
-			indices         []int
-			hasExternalPath bool
+			layers  [][]string
+			indices []int
 		}
 		var layerDuplicates []duplicateEntry
 		var conditionIndicesByLayer map[int]map[conditionalImportLayerKey][]int
@@ -3772,19 +3771,13 @@ func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order
 				layerDuplicates = append(layerDuplicates, duplicateEntry{layers: layersKey})
 			}
 			duplicates := layerDuplicates[index].indices
-			if entry.kind == cssImportExternalPath {
-				// Keep groups with external imports on the original scan. A later
-				// source-index import cannot use an index that omits this candidate.
-				layerDuplicates[index].hasExternalPath = true
-			}
-			hasExternalPath := layerDuplicates[index].hasExternalPath
 			var conditionIndices map[conditionalImportLayerKey][]int
 			var hasConditionIndex bool
-			if !hasExternalPath && conditionIndicesByLayer != nil {
+			if conditionIndicesByLayer != nil {
 				conditionIndices, hasConditionIndex = conditionIndicesByLayer[index]
 			}
 			canUseConditionIndex := false
-			if !hasExternalPath && (conditionIndices != nil || (len(duplicates) > 1 && !hasConditionIndex)) {
+			if conditionIndices != nil || (len(duplicates) > 1 && !hasConditionIndex) {
 				canUseConditionIndex = conditionalImportHasIndexableLayerCondition(entry.conditions)
 			}
 			if hasConditionIndex {
