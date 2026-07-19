@@ -3660,23 +3660,6 @@ func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order
 			}
 
 			if duplicateIndex != -1 {
-				if conditionIndices == nil && !hasConditionIndex &&
-					!conditionalImportHasIndexableLayerCondition(entry.conditions) {
-					// Repeated non-layer conditions use the old direct match. Remember
-					// that after the first match instead of rechecking every import.
-					switch entry.kind {
-					case cssImportSourceIndex:
-						if sourceIndexConditionIndices == nil {
-							sourceIndexConditionIndices = make(map[uint32]map[conditionalImportLayerKey][]int)
-						}
-						sourceIndexConditionIndices[entry.sourceIndex] = nil
-					case cssImportExternalPath:
-						if externalPathConditionIndices == nil {
-							externalPathConditionIndices = make(map[logger.Path]map[conditionalImportLayerKey][]int)
-						}
-						externalPathConditionIndices[entry.externalPath] = nil
-					}
-				}
 				if entry.kind == cssImportSourceIndex {
 					order[i].kind = cssImportLayers
 					order[i].layers = c.graph.Files[entry.sourceIndex].InputFile.Repr.(*graph.CSSRepr).AST.LayersPostImport
@@ -3869,13 +3852,6 @@ func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order
 			}
 
 			if duplicateIndex != -1 {
-				if conditionIndices == nil && !hasConditionIndex &&
-					!conditionalImportHasIndexableLayerCondition(entry.conditions) {
-					if conditionIndicesByLayer == nil {
-						conditionIndicesByLayer = make(map[int]map[conditionalImportLayerKey][]int)
-					}
-					conditionIndicesByLayer[index] = nil
-				}
 				wipIndex := duplicates[duplicateIndex]
 				if entry.kind == cssImportLayers {
 					// Don't add this to the duplicate list below because it's redundant
