@@ -3561,56 +3561,122 @@ func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order
 	// file. This works because in CSS, the last instance of a declaration
 	// overrides all previous instances of that declaration.
 	{
-		sourceIndexDuplicates := make(map[uint32]conditionalImportDuplicates)
-		externalPathDuplicates := make(map[logger.Path]conditionalImportDuplicates)
+		sourceIndexDuplicates := make(map[uint32][]int)
+		externalPathDuplicates := make(map[logger.Path][]int)
+		var sourceIndexConditionIndices map[uint32]map[conditionalImportConditionsKey][]int
+		var externalPathConditionIndices map[logger.Path]map[conditionalImportConditionsKey][]int
 
 		for i := len(order) - 1; i >= 0; i-- {
 			entry := order[i]
-			var duplicates conditionalImportDuplicates
+			var duplicates []int
+			var conditionIndices map[conditionalImportConditionsKey][]int
+			var hasConditionIndex bool
 			switch entry.kind {
 			case cssImportSourceIndex:
 				duplicates = sourceIndexDuplicates[entry.sourceIndex]
+				if sourceIndexConditionIndices != nil {
+					conditionIndices, hasConditionIndex = sourceIndexConditionIndices[entry.sourceIndex]
+				}
 
 			case cssImportExternalPath:
 				duplicates = externalPathDuplicates[entry.externalPath]
+				if externalPathConditionIndices != nil {
+					conditionIndices, hasConditionIndex = externalPathConditionIndices[entry.externalPath]
+				}
 
 			default:
 				continue
 			}
 
-			duplicateIndex := -1
-			if len(duplicates.indices) > 0 && (duplicates.conditionIndices != nil || duplicates.fullConditionIndices != nil) &&
-				isConditionalImportRedundant(entry.conditions, order[duplicates.indices[0]].conditions) {
-				// The backward pass stores later imports first. Keep checking that
-				// latest import directly even after a divergent entry built an index.
-				duplicateIndex = 0
-			} else if fullConditionIndices := duplicates.fullConditionIndices; fullConditionIndices != nil {
-				duplicateIndex = findLatestFullConditionalImportDuplicate(entry.conditions, fullConditionIndices, duplicates.indices, order)
-			} else if conditionIndices := duplicates.conditionIndices; conditionIndices != nil {
-				var incompatible bool
-				duplicateIndex, incompatible = findLatestConditionalImportDuplicate(entry.conditions, conditionIndices, duplicates.indices, order)
-				if incompatible {
-					duplicates.fullConditionIndices = makeFullConditionalImportConditionIndex(duplicates.indices, order)
-					duplicates.conditionIndices = nil
-					duplicateIndex = findLatestFullConditionalImportDuplicate(entry.conditions, duplicates.fullConditionIndices, duplicates.indices, order)
+			canUseConditionIndex := false
+			if conditionIndices != nil || (len(duplicates) > 1 && !hasConditionIndex) {
+				canUseConditionIndex = conditionalImportHasOnlyLayerConditions(entry.conditions)
+			}
+			if hasConditionIndex {
+				if conditionIndices == nil {
+					// This duplicate group is permanently handled by the old scan.
+					canUseConditionIndex = false
+				} else if !canUseConditionIndex {
+					// Supports/media have omission semantics beyond this layer-only
+					// index, so keep this duplicate group on the old scan.
+					switch entry.kind {
+					case cssImportSourceIndex:
+						sourceIndexConditionIndices[entry.sourceIndex] = nil
+					case cssImportExternalPath:
+						externalPathConditionIndices[entry.externalPath] = nil
+					}
+					conditionIndices = nil
 				}
-			} else {
-				for j, index := range duplicates.indices {
+			}
+
+			duplicateIndex := -1
+			if conditionIndices != nil {
+				if len(duplicates) > 0 && isConditionalImportRedundant(entry.conditions, order[duplicates[0]].conditions) {
+					// The backward pass stores later imports first, so preserve the
+					// original immediate check for the newest import.
+					duplicateIndex = 0
+				} else {
+					var incompatible bool
+					duplicateIndex, incompatible = findConditionalImportDuplicate(entry.conditions, conditionIndices, duplicates, order)
+					if duplicateIndex == -1 {
+						if incompatible {
+							// Hash collisions fall back to the old directional scan.
+							switch entry.kind {
+							case cssImportSourceIndex:
+								sourceIndexConditionIndices[entry.sourceIndex] = nil
+							case cssImportExternalPath:
+								externalPathConditionIndices[entry.externalPath] = nil
+							}
+							conditionIndices = nil
+							canUseConditionIndex = false
+						} else {
+							// No indexed layer prefix can be redundant, so there is no
+							// need to repeat the original scan.
+							key := makeConditionalImportConditionsKey(entry.conditions)
+							conditionIndices[key] = append(conditionIndices[key], len(duplicates))
+							duplicates = append(duplicates, i)
+							switch entry.kind {
+							case cssImportSourceIndex:
+								sourceIndexDuplicates[entry.sourceIndex] = duplicates
+							case cssImportExternalPath:
+								externalPathDuplicates[entry.externalPath] = duplicates
+							}
+							continue
+						}
+					}
+				}
+			}
+
+			if duplicateIndex == -1 {
+				for j, index := range duplicates {
 					if isConditionalImportRedundant(entry.conditions, order[index].conditions) {
 						duplicateIndex = j
 						break
 					}
-				}
-				if duplicateIndex == -1 && len(duplicates.indices) > 0 {
-					duplicates.conditionIndices = makeConditionalImportConditionIndices(duplicates.indices, order)
-					if _, incompatible := findLatestConditionalImportDuplicate(entry.conditions, duplicates.conditionIndices, duplicates.indices, order); incompatible {
-						duplicates.fullConditionIndices = makeFullConditionalImportConditionIndex(duplicates.indices, order)
-						duplicates.conditionIndices = nil
+					if canUseConditionIndex && !conditionalImportHasOnlyLayerConditions(order[index].conditions) {
+						canUseConditionIndex = false
 					}
 				}
 			}
 
 			if duplicateIndex != -1 {
+				if conditionIndices == nil && !hasConditionIndex &&
+					!conditionalImportHasOnlyLayerConditions(entry.conditions) {
+					// Repeated non-layer conditions use the old direct match. Remember
+					// that after the first match instead of rechecking every import.
+					switch entry.kind {
+					case cssImportSourceIndex:
+						if sourceIndexConditionIndices == nil {
+							sourceIndexConditionIndices = make(map[uint32]map[conditionalImportConditionsKey][]int)
+						}
+						sourceIndexConditionIndices[entry.sourceIndex] = nil
+					case cssImportExternalPath:
+						if externalPathConditionIndices == nil {
+							externalPathConditionIndices = make(map[logger.Path]map[conditionalImportConditionsKey][]int)
+						}
+						externalPathConditionIndices[entry.externalPath] = nil
+					}
+				}
 				if entry.kind == cssImportSourceIndex {
 					order[i].kind = cssImportLayers
 					order[i].layers = c.graph.Files[entry.sourceIndex].InputFile.Repr.(*graph.CSSRepr).AST.LayersPostImport
@@ -3623,14 +3689,24 @@ func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order
 				continue
 			}
 
-			if conditionIndices := duplicates.conditionIndices; conditionIndices != nil {
+			if conditionIndices == nil && !hasConditionIndex && canUseConditionIndex && len(duplicates) > 1 {
+				conditionIndices = makeConditionalImportConditionIndices(duplicates, order)
 				key := makeConditionalImportConditionsKey(entry.conditions)
-				conditionIndices[key] = append(conditionIndices[key], len(duplicates.indices))
+				conditionIndices[key] = append(conditionIndices[key], len(duplicates))
+				switch entry.kind {
+				case cssImportSourceIndex:
+					if sourceIndexConditionIndices == nil {
+						sourceIndexConditionIndices = make(map[uint32]map[conditionalImportConditionsKey][]int)
+					}
+					sourceIndexConditionIndices[entry.sourceIndex] = conditionIndices
+				case cssImportExternalPath:
+					if externalPathConditionIndices == nil {
+						externalPathConditionIndices = make(map[logger.Path]map[conditionalImportConditionsKey][]int)
+					}
+					externalPathConditionIndices[entry.externalPath] = conditionIndices
+				}
 			}
-			if fullConditionIndices := duplicates.fullConditionIndices; fullConditionIndices != nil {
-				fullConditionIndices.append(entry.conditions, len(duplicates.indices))
-			}
-			duplicates.indices = append(duplicates.indices, i)
+			duplicates = append(duplicates, i)
 			switch entry.kind {
 			case cssImportSourceIndex:
 				sourceIndexDuplicates[entry.sourceIndex] = duplicates
@@ -3645,10 +3721,11 @@ func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order
 	// copy instead of the last copy like other things in CSS.
 	{
 		type duplicateEntry struct {
-			layers [][]string
-			conditionalImportDuplicates
+			layers  [][]string
+			indices []int
 		}
 		var layerDuplicates []duplicateEntry
+		var conditionIndicesByLayer map[int]map[conditionalImportConditionsKey][]int
 
 		for i := range order {
 			entry := order[i]
@@ -3736,41 +3813,70 @@ func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order
 				// Allocate a new set of duplicate indices to track this combination.
 				layerDuplicates = append(layerDuplicates, duplicateEntry{layers: layersKey})
 			}
-			duplicates := &layerDuplicates[index].conditionalImportDuplicates
+			duplicates := layerDuplicates[index].indices
+			var conditionIndices map[conditionalImportConditionsKey][]int
+			var hasConditionIndex bool
+			if conditionIndicesByLayer != nil {
+				conditionIndices, hasConditionIndex = conditionIndicesByLayer[index]
+			}
+			canUseConditionIndex := false
+			if conditionIndices != nil || (len(duplicates) > 1 && !hasConditionIndex) {
+				canUseConditionIndex = conditionalImportHasOnlyLayerConditions(entry.conditions)
+			}
+			if hasConditionIndex {
+				if conditionIndices == nil {
+					canUseConditionIndex = false
+				} else if !canUseConditionIndex {
+					conditionIndicesByLayer[index] = nil
+					conditionIndices = nil
+				}
+			}
+
 			duplicateIndex := -1
-			lastDuplicateIndex := len(duplicates.indices) - 1
-			if lastDuplicateIndex >= 0 && (duplicates.conditionIndices != nil || duplicates.fullConditionIndices != nil) &&
-				isConditionalImportRedundant(entry.conditions, wipOrder[duplicates.indices[lastDuplicateIndex]].conditions) {
-				// Preserve the old reverse scan's immediate match after a divergent
-				// entry has built an index for this layer group.
-				duplicateIndex = lastDuplicateIndex
-			} else if fullConditionIndices := duplicates.fullConditionIndices; fullConditionIndices != nil {
-				duplicateIndex = findLatestFullConditionalImportDuplicate(entry.conditions, fullConditionIndices, duplicates.indices, wipOrder)
-			} else if conditionIndices := duplicates.conditionIndices; conditionIndices != nil {
-				var incompatible bool
-				duplicateIndex, incompatible = findLatestConditionalImportDuplicate(entry.conditions, conditionIndices, duplicates.indices, wipOrder)
-				if incompatible {
-					duplicates.fullConditionIndices = makeFullConditionalImportConditionIndex(duplicates.indices, wipOrder)
-					duplicates.conditionIndices = nil
-					duplicateIndex = findLatestFullConditionalImportDuplicate(entry.conditions, duplicates.fullConditionIndices, duplicates.indices, wipOrder)
-				}
-			} else {
-				for j := len(duplicates.indices) - 1; j >= 0; j-- {
-					if isConditionalImportRedundant(entry.conditions, wipOrder[duplicates.indices[j]].conditions) {
-						duplicateIndex = j
-						break
-					}
-				}
-				if duplicateIndex == -1 && len(duplicates.indices) > 0 {
-					duplicates.conditionIndices = makeConditionalImportConditionIndices(duplicates.indices, wipOrder)
-					if _, incompatible := findLatestConditionalImportDuplicate(entry.conditions, duplicates.conditionIndices, duplicates.indices, wipOrder); incompatible {
-						duplicates.fullConditionIndices = makeFullConditionalImportConditionIndex(duplicates.indices, wipOrder)
-						duplicates.conditionIndices = nil
+			needsScan := true
+			if conditionIndices != nil {
+				lastDuplicateIndex := len(duplicates) - 1
+				if lastDuplicateIndex >= 0 &&
+					isConditionalImportRedundant(entry.conditions, wipOrder[duplicates[lastDuplicateIndex]].conditions) {
+					// Preserve the old reverse scan's immediate match after this
+					// group has diverged into distinct layer prefixes.
+					duplicateIndex = lastDuplicateIndex
+				} else {
+					var incompatible bool
+					duplicateIndex, incompatible = findConditionalImportDuplicate(entry.conditions, conditionIndices, duplicates, wipOrder)
+					if duplicateIndex == -1 {
+						if incompatible {
+							conditionIndicesByLayer[index] = nil
+							conditionIndices = nil
+							canUseConditionIndex = false
+						} else {
+							needsScan = false
+						}
 					}
 				}
 			}
+
+			if duplicateIndex == -1 && needsScan {
+				for j := len(duplicates) - 1; j >= 0; j-- {
+					if wipIndex := duplicates[j]; isConditionalImportRedundant(entry.conditions, wipOrder[wipIndex].conditions) {
+						duplicateIndex = j
+						break
+					}
+					if canUseConditionIndex && !conditionalImportHasOnlyLayerConditions(wipOrder[duplicates[j]].conditions) {
+						canUseConditionIndex = false
+					}
+				}
+			}
+
 			if duplicateIndex != -1 {
-				wipIndex := duplicates.indices[duplicateIndex]
+				if conditionIndices == nil && !hasConditionIndex &&
+					!conditionalImportHasOnlyLayerConditions(entry.conditions) {
+					if conditionIndicesByLayer == nil {
+						conditionIndicesByLayer = make(map[int]map[conditionalImportConditionsKey][]int)
+					}
+					conditionIndicesByLayer[index] = nil
+				}
+				wipIndex := duplicates[duplicateIndex]
 				if entry.kind == cssImportLayers {
 					// Don't add this to the duplicate list below because it's redundant
 					continue
@@ -3798,10 +3904,10 @@ func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order
 				// This can be improved by dropping the empty layer. But we can
 				// only do this if there's nothing in between these two rules.
 				replaceEmptyLayer := false
-				if duplicateIndex == len(duplicates.indices)-1 && wipIndex == len(wipOrder)-1 {
+				if duplicateIndex == len(duplicates)-1 && wipIndex == len(wipOrder)-1 {
 					if other := wipOrder[wipIndex]; other.kind == cssImportLayers && importConditionsAreEqual(entry.conditions, other.conditions) {
 						// Remove the previous entry and then overwrite it below
-						if conditionIndices := duplicates.conditionIndices; conditionIndices != nil {
+						if conditionIndices != nil {
 							previousKey := makeConditionalImportConditionsKey(other.conditions)
 							previousIndices := conditionIndices[previousKey]
 							if len(previousIndices) == 1 {
@@ -3810,10 +3916,7 @@ func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order
 								conditionIndices[previousKey] = previousIndices[:len(previousIndices)-1]
 							}
 						}
-						if fullConditionIndices := duplicates.fullConditionIndices; fullConditionIndices != nil {
-							fullConditionIndices.remove(other.conditions)
-						}
-						duplicates.indices = duplicates.indices[:duplicateIndex]
+						duplicates = duplicates[:duplicateIndex]
 						wipOrder = wipOrder[:wipIndex]
 						replaceEmptyLayer = true
 					}
@@ -3827,14 +3930,19 @@ func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order
 					continue
 				}
 			}
-			if conditionIndices := duplicates.conditionIndices; conditionIndices != nil {
+
+			if conditionIndices == nil && !hasConditionIndex && canUseConditionIndex && len(duplicates) > 1 {
+				conditionIndices = makeConditionalImportConditionIndices(duplicates, wipOrder)
+				if conditionIndicesByLayer == nil {
+					conditionIndicesByLayer = make(map[int]map[conditionalImportConditionsKey][]int)
+				}
+				conditionIndicesByLayer[index] = conditionIndices
+			}
+			if conditionIndices != nil {
 				conditionKey := makeConditionalImportConditionsKey(entry.conditions)
-				conditionIndices[conditionKey] = append(conditionIndices[conditionKey], len(duplicates.indices))
+				conditionIndices[conditionKey] = append(conditionIndices[conditionKey], len(duplicates))
 			}
-			if fullConditionIndices := duplicates.fullConditionIndices; fullConditionIndices != nil {
-				fullConditionIndices.append(entry.conditions, len(duplicates.indices))
-			}
-			duplicates.indices = append(duplicates.indices, len(wipOrder))
+			layerDuplicates[index].indices = append(duplicates, len(wipOrder))
 			wipOrder = append(wipOrder, entry)
 		}
 
@@ -3886,26 +3994,18 @@ type conditionalImportConditionsKey struct {
 	count uint32
 }
 
-type conditionalImportFullConditionKey struct {
-	layers   uint32
-	supports uint32
-	queries  uint32
-}
-
-type conditionalImportFullConditionIndexNode struct {
-	indices  []int
-	maxIndex int
-	children map[conditionalImportFullConditionKey]*conditionalImportFullConditionIndexNode
-}
-
-type conditionalImportFullConditionIndex struct {
-	root conditionalImportFullConditionIndexNode
-}
-
-type conditionalImportDuplicates struct {
-	indices              []int
-	conditionIndices     map[conditionalImportConditionsKey][]int
-	fullConditionIndices *conditionalImportFullConditionIndex
+// Supports and media have additional omission semantics. Leave those duplicate
+// groups on the original predicate scan instead of indexing only their layers.
+func conditionalImportHasOnlyLayerConditions(conditions []css_ast.ImportConditions) bool {
+	if len(conditions) == 0 {
+		return false
+	}
+	for _, conditions := range conditions {
+		if len(conditions.Layers) == 0 || len(conditions.Supports) > 0 || len(conditions.Queries) > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func makeConditionalImportConditionsKey(conditions []css_ast.ImportConditions) (key conditionalImportConditionsKey) {
@@ -3914,64 +4014,6 @@ func makeConditionalImportConditionsKey(conditions []css_ast.ImportConditions) (
 		key.hash = css_ast.HashTokens(key.hash, conditions.Layers)
 	}
 	return
-}
-
-func makeFullConditionalImportConditionKey(
-	conditions css_ast.ImportConditions,
-	supports []css_ast.Token,
-	queries []css_ast.MediaQuery,
-) conditionalImportFullConditionKey {
-	return conditionalImportFullConditionKey{
-		layers:   css_ast.HashTokens(0, conditions.Layers),
-		supports: css_ast.HashTokens(0, supports),
-		queries:  css_ast.HashMediaQueries(0, queries),
-	}
-}
-
-func (index *conditionalImportFullConditionIndex) append(conditions []css_ast.ImportConditions, duplicateIndex int) {
-	node := &index.root
-	node.maxIndex = duplicateIndex
-	for _, conditions := range conditions {
-		key := makeFullConditionalImportConditionKey(conditions, conditions.Supports, conditions.Queries)
-		if node.children == nil {
-			node.children = make(map[conditionalImportFullConditionKey]*conditionalImportFullConditionIndexNode)
-		}
-		child := node.children[key]
-		if child == nil {
-			child = &conditionalImportFullConditionIndexNode{maxIndex: -1}
-			node.children[key] = child
-		}
-		node = child
-		node.maxIndex = duplicateIndex
-	}
-	node.indices = append(node.indices, duplicateIndex)
-}
-
-func (index *conditionalImportFullConditionIndex) remove(conditions []css_ast.ImportConditions) {
-	index.root.remove(conditions, 0)
-}
-
-func (node *conditionalImportFullConditionIndexNode) remove(conditions []css_ast.ImportConditions, depth int) bool {
-	if depth == len(conditions) {
-		node.indices = node.indices[:len(node.indices)-1]
-	} else {
-		condition := conditions[depth]
-		key := makeFullConditionalImportConditionKey(condition, condition.Supports, condition.Queries)
-		child := node.children[key]
-		if child.remove(conditions, depth+1) {
-			delete(node.children, key)
-		}
-	}
-	node.maxIndex = -1
-	if len(node.indices) > 0 {
-		node.maxIndex = node.indices[len(node.indices)-1]
-	}
-	for _, child := range node.children {
-		if child.maxIndex > node.maxIndex {
-			node.maxIndex = child.maxIndex
-		}
-	}
-	return len(node.indices) == 0 && len(node.children) == 0
 }
 
 func makeConditionalImportConditionIndices(indices []int, order []cssImportOrder) map[conditionalImportConditionsKey][]int {
@@ -3983,25 +4025,16 @@ func makeConditionalImportConditionIndices(indices []int, order []cssImportOrder
 	return conditionIndices
 }
 
-func makeFullConditionalImportConditionIndex(indices []int, order []cssImportOrder) *conditionalImportFullConditionIndex {
-	conditionIndices := &conditionalImportFullConditionIndex{root: conditionalImportFullConditionIndexNode{maxIndex: -1}}
-	for i, index := range indices {
-		conditionIndices.append(order[index].conditions, i)
-	}
-	return conditionIndices
-}
-
 // This uses a hash of the layer-condition prefix to avoid checking imports
-// that cannot be redundant. The full predicate is still used to reject hash
-// collisions and to check the supports and media conditions. If the most
-// recent matching prefix is incompatible, the caller upgrades to the full
-// condition index instead of scanning a potentially large collision bucket.
-func findLatestConditionalImportDuplicate(
+// that cannot be redundant. The full predicate validates the selected entry.
+// A collision uses the original directional scan for that duplicate group.
+func findConditionalImportDuplicate(
 	earlier []css_ast.ImportConditions,
 	conditionIndices map[conditionalImportConditionsKey][]int,
 	duplicates []int,
 	order []cssImportOrder,
 ) (duplicateIndex int, incompatible bool) {
+	duplicateIndex = -1
 	key := conditionalImportConditionsKey{}
 	for {
 		if indices := conditionIndices[key]; len(indices) > 0 {
@@ -4022,94 +4055,6 @@ func findLatestConditionalImportDuplicate(
 		return duplicateIndex, false
 	}
 	return -1, true
-}
-
-func findLatestFullConditionalImportDuplicate(
-	earlier []css_ast.ImportConditions,
-	conditionIndices *conditionalImportFullConditionIndex,
-	duplicates []int,
-	order []cssImportOrder,
-) int {
-	duplicateIndex := findLatestFullConditionalImportDuplicateInTrie(earlier, &conditionIndices.root, 0)
-	if duplicateIndex == -1 || isConditionalImportRedundant(earlier, order[duplicates[duplicateIndex]].conditions) {
-		return duplicateIndex
-	}
-
-	// The trie is keyed by hashes, so only a collision falls back to the
-	// original directional scan. Normal lookups descend just one highest-index
-	// compatible branch instead of materializing the whole condition frontier.
-	for duplicateIndex--; duplicateIndex >= 0; duplicateIndex-- {
-		if isConditionalImportRedundant(earlier, order[duplicates[duplicateIndex]].conditions) {
-			return duplicateIndex
-		}
-	}
-	return -1
-}
-
-func findLatestFullConditionalImportDuplicateInTrie(
-	earlier []css_ast.ImportConditions,
-	node *conditionalImportFullConditionIndexNode,
-	depth int,
-) int {
-	duplicateIndex := -1
-	if len(node.indices) > 0 {
-		duplicateIndex = node.indices[len(node.indices)-1]
-	}
-	if depth == len(earlier) {
-		return duplicateIndex
-	}
-
-	condition := earlier[depth]
-	keys := [3]conditionalImportFullConditionKey{
-		makeFullConditionalImportConditionKey(condition, condition.Supports, condition.Queries),
-	}
-	keyCount := 1
-	if len(condition.Supports) > 0 {
-		keys[keyCount] = makeFullConditionalImportConditionKey(condition, nil, condition.Queries)
-		keyCount++
-	}
-	if len(condition.Queries) > 0 {
-		keys[keyCount] = makeFullConditionalImportConditionKey(condition, condition.Supports, nil)
-		keyCount++
-	}
-
-	var children [3]*conditionalImportFullConditionIndexNode
-	childCount := 0
-	for _, key := range keys[:keyCount] {
-		if child := node.children[key]; child != nil {
-			isDuplicate := false
-			for _, previous := range children[:childCount] {
-				if child == previous {
-					isDuplicate = true
-					break
-				}
-			}
-			if !isDuplicate {
-				children[childCount] = child
-				childCount++
-			}
-		}
-	}
-
-	for childCount > 0 {
-		bestChild := 0
-		for i := 1; i < childCount; i++ {
-			if children[i].maxIndex > children[bestChild].maxIndex {
-				bestChild = i
-			}
-		}
-		child := children[bestChild]
-		childCount--
-		children[bestChild] = children[childCount]
-		if child.maxIndex <= duplicateIndex {
-			break
-		}
-		if index := findLatestFullConditionalImportDuplicateInTrie(earlier, child, depth+1); index > duplicateIndex {
-			duplicateIndex = index
-		}
-	}
-
-	return duplicateIndex
 }
 
 // Given two "@import" rules for the same source index (an earlier one and a

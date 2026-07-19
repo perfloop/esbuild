@@ -1,12 +1,12 @@
 package bundler_tests
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/evanw/esbuild/internal/compat"
 	"github.com/evanw/esbuild/internal/config"
+	"github.com/evanw/esbuild/internal/test"
 )
 
 var css_suite = suite{
@@ -2654,57 +2654,56 @@ func TestCSSAssetPathsWithSpacesBundle(t *testing.T) {
 	})
 }
 
-func TestCSSConditionalImportDedupDistinctSupports(t *testing.T) {
+func TestCSSConditionalImportDedupLayerConditionPrefix(t *testing.T) {
 	bundle := scanCSSConditionalImportFixture(t, map[string]string{
 		"/entry.css": `
-			@import "./shared.css" layer(shared) supports(display: feature-a);
-			@import "./shared.css" layer(shared) supports(display: feature-b);
-			@import "./shared.css" layer(shared) supports(display: feature-c);
+			@import "./outer.css" layer(alpha);
+			@import "./shared.css" layer(beta);
+			@import "./shared.css" layer(alpha);
+			@import "./shared.css" layer(gamma);
 		`,
+		"/outer.css":  `@import "./shared.css" layer(inner);`,
 		"/shared.css": `.shared { color: red }`,
 	})
 
-	output := compileCSSConditionalImportFixture(t, &bundle)
-	for _, feature := range []string{"feature-a", "feature-b", "feature-c"} {
-		if !strings.Contains(output, "@supports (display: "+feature+")") {
-			t.Fatalf("missing non-redundant supports condition %q in output:\n%s", feature, output)
-		}
-	}
+	test.AssertEqualWithDiff(t, compileCSSConditionalImportFixture(t, &bundle), `@layer alpha {
+  @layer inner;
 }
 
-func cssConditionalImportDeepConditionFiles(depth int) map[string]string {
-	files := map[string]string{
-		"/entry.css": `
-			@import "./a01.css";
-			@import "./b01.css";
-			@import "./c01.css";
-		`,
-		"/shared.css": `.shared { color: red }`,
-	}
+/* outer.css */
+@layer alpha;
 
-	for _, branch := range []string{"a", "b", "c"} {
-		for i := 1; i <= depth; i++ {
-			next := "/shared.css"
-			if i < depth {
-				next = fmt.Sprintf("/%s%02d.css", branch, i+1)
-			}
-			supports := "common"
-			if i == depth {
-				supports = "feature-" + branch
-			}
-			files[fmt.Sprintf("/%s%02d.css", branch, i)] = fmt.Sprintf(`@import %q layer(shared) supports(display: %s) screen;`, next, supports)
-		}
-	}
-
-	return files
+/* shared.css */
+@layer beta {
+  .shared {
+    color: red;
+  }
 }
 
-func TestCSSConditionalImportDedupDeepConditionPrefixes(t *testing.T) {
-	bundle := scanCSSConditionalImportFixture(t, cssConditionalImportDeepConditionFiles(10))
+/* shared.css */
+@layer alpha {
+  .shared {
+    color: red;
+  }
+}
+
+/* shared.css */
+@layer gamma {
+  .shared {
+    color: red;
+  }
+}
+
+/* entry.css */
+`)
+}
+
+func TestCSSConditionalImportDedupFullConditionFallback(t *testing.T) {
+	const depth = 4
+	const probeCount = 3
+	bundle := scanCSSConditionalImportFixture(t, cssConditionalImportFullConditionBenchmarkFiles(depth, probeCount))
 	output := compileCSSConditionalImportFixture(t, &bundle)
-	for _, branch := range []string{"a", "b", "c"} {
-		if !strings.Contains(output, "feature-"+branch) {
-			t.Fatalf("missing non-redundant nested supports condition feature-%s in output:\n%s", branch, output)
-		}
+	if sharedCopies := strings.Count(output, ".shared {"); sharedCopies != (1<<depth)+2*probeCount {
+		t.Fatalf("full-condition fallback retained %d shared imports, want %d", sharedCopies, (1<<depth)+2*probeCount)
 	}
 }
