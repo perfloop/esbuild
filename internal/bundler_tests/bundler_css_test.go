@@ -5,6 +5,8 @@ import (
 
 	"github.com/evanw/esbuild/internal/compat"
 	"github.com/evanw/esbuild/internal/config"
+	"github.com/evanw/esbuild/internal/css_ast"
+	"github.com/evanw/esbuild/internal/css_lexer"
 )
 
 var css_suite = suite{
@@ -115,6 +117,39 @@ func TestCSSAtImport(t *testing.T) {
 			"/shared.css": `
 				.shared { color: black }
 			`,
+		},
+		entryPaths: []string{"/entry.css"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.css",
+		},
+	})
+}
+
+func TestCSSAtImportDirectLayerConditionDedup(t *testing.T) {
+	// These distinct direct layer names deliberately collide in HashTokens.
+	layerTokens := func(name string) []css_ast.Token {
+		children := []css_ast.Token{{Kind: css_lexer.TIdent, Text: name}}
+		return []css_ast.Token{{Kind: css_lexer.TFunction, Text: "layer", Children: &children}}
+	}
+	first := layerTokens("pm9dqw1fp")
+	second := layerTokens("pnevrugj0")
+	if css_ast.HashTokens(0, first) != css_ast.HashTokens(0, second) {
+		t.Fatal("expected direct layer names to have the same hash")
+	}
+
+	css_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.css": `
+				@import "./shared.css" layer(alpha);
+				@import "./shared.css" layer(pm9dqw1fp);
+				@import "./shared.css" layer(beta);
+				@import "./shared.css" layer(pnevrugj0);
+				@import "./shared.css" layer(alpha);
+				@import "./shared.css" layer(pm9dqw1fp);
+				@import "./shared.css" layer(gamma);
+			`,
+			"/shared.css": `.shared { color: black }`,
 		},
 		entryPaths: []string{"/entry.css"},
 		options: config.Options{

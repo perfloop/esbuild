@@ -1606,6 +1606,49 @@ TestCSSAtImportConditionsWithImportRecordsBundle
 /* entry.css */
 
 ================================================================================
+TestCSSAtImportDirectLayerConditionDedup
+---------- /out.css ----------
+@layer alpha;
+@layer pm9dqw1fp;
+
+/* shared.css */
+@layer beta {
+  .shared {
+    color: black;
+  }
+}
+
+/* shared.css */
+@layer pnevrugj0 {
+  .shared {
+    color: black;
+  }
+}
+
+/* shared.css */
+@layer alpha {
+  .shared {
+    color: black;
+  }
+}
+
+/* shared.css */
+@layer pm9dqw1fp {
+  .shared {
+    color: black;
+  }
+}
+
+/* shared.css */
+@layer gamma {
+  .shared {
+    color: black;
+  }
+}
+
+/* entry.css */
+
+================================================================================
 TestCSSAtImportExtensionOrderCollision
 ---------- /out.css ----------
 /* test.css */
