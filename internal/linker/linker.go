@@ -3564,7 +3564,6 @@ func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order
 		sourceIndexDuplicates := make(map[uint32][]int)
 		externalPathDuplicates := make(map[logger.Path][]int)
 		var sourceIndexConditionIndices map[uint32]map[conditionalImportLayerKey][]int
-		var externalPathConditionIndices map[logger.Path]map[conditionalImportLayerKey][]int
 
 		for i := len(order) - 1; i >= 0; i-- {
 			entry := order[i]
@@ -3580,16 +3579,14 @@ func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order
 
 			case cssImportExternalPath:
 				duplicates = externalPathDuplicates[entry.externalPath]
-				if externalPathConditionIndices != nil {
-					conditionIndices, hasConditionIndex = externalPathConditionIndices[entry.externalPath]
-				}
 
 			default:
 				continue
 			}
 
 			canUseConditionIndex := false
-			if conditionIndices != nil || (len(duplicates) > 1 && !hasConditionIndex) {
+			if entry.kind == cssImportSourceIndex &&
+				(conditionIndices != nil || (len(duplicates) > 1 && !hasConditionIndex)) {
 				canUseConditionIndex = conditionalImportHasIndexableLayerCondition(entry.conditions)
 			}
 			if hasConditionIndex {
@@ -3599,12 +3596,7 @@ func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order
 				} else if !canUseConditionIndex {
 					// Supports/media have omission semantics beyond this layer-only
 					// index, so keep this duplicate group on the old scan.
-					switch entry.kind {
-					case cssImportSourceIndex:
-						sourceIndexConditionIndices[entry.sourceIndex] = nil
-					case cssImportExternalPath:
-						externalPathConditionIndices[entry.externalPath] = nil
-					}
+					sourceIndexConditionIndices[entry.sourceIndex] = nil
 					conditionIndices = nil
 				}
 			}
@@ -3620,27 +3612,14 @@ func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order
 					duplicateIndex, incompatible = findConditionalImportLayerDuplicate(entry.conditions, conditionIndices, duplicates, order)
 					if duplicateIndex == -1 {
 						if incompatible {
-							// Hash collisions fall back to the old directional scan.
-							switch entry.kind {
-							case cssImportSourceIndex:
-								sourceIndexConditionIndices[entry.sourceIndex] = nil
-							case cssImportExternalPath:
-								externalPathConditionIndices[entry.externalPath] = nil
-							}
-							conditionIndices = nil
-							canUseConditionIndex = false
+							// Hash collisions use the old directional scan for this lookup.
 						} else {
 							// No indexed layer prefix can be redundant, so there is no
 							// need to repeat the original scan.
 							key := makeConditionalImportLayerKey(entry.conditions)
 							conditionIndices[key] = append(conditionIndices[key], len(duplicates))
 							duplicates = append(duplicates, i)
-							switch entry.kind {
-							case cssImportSourceIndex:
-								sourceIndexDuplicates[entry.sourceIndex] = duplicates
-							case cssImportExternalPath:
-								externalPathDuplicates[entry.externalPath] = duplicates
-							}
+							sourceIndexDuplicates[entry.sourceIndex] = duplicates
 							continue
 						}
 					}
@@ -3676,18 +3655,13 @@ func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order
 				conditionIndices = makeConditionalImportLayerIndices(duplicates, order)
 				key := makeConditionalImportLayerKey(entry.conditions)
 				conditionIndices[key] = append(conditionIndices[key], len(duplicates))
-				switch entry.kind {
-				case cssImportSourceIndex:
-					if sourceIndexConditionIndices == nil {
-						sourceIndexConditionIndices = make(map[uint32]map[conditionalImportLayerKey][]int)
-					}
-					sourceIndexConditionIndices[entry.sourceIndex] = conditionIndices
-				case cssImportExternalPath:
-					if externalPathConditionIndices == nil {
-						externalPathConditionIndices = make(map[logger.Path]map[conditionalImportLayerKey][]int)
-					}
-					externalPathConditionIndices[entry.externalPath] = conditionIndices
+				if sourceIndexConditionIndices == nil {
+					sourceIndexConditionIndices = make(map[uint32]map[conditionalImportLayerKey][]int)
 				}
+				sourceIndexConditionIndices[entry.sourceIndex] = conditionIndices
+			} else if conditionIndices != nil {
+				key := makeConditionalImportLayerKey(entry.conditions)
+				conditionIndices[key] = append(conditionIndices[key], len(duplicates))
 			}
 			duplicates = append(duplicates, i)
 			switch entry.kind {
@@ -3829,9 +3803,7 @@ func (c *linkerContext) findImportedFilesInCSSOrder(entryPoints []uint32) (order
 					duplicateIndex, incompatible = findConditionalImportLayerDuplicate(entry.conditions, conditionIndices, duplicates, wipOrder)
 					if duplicateIndex == -1 {
 						if incompatible {
-							conditionIndicesByLayer[index] = nil
-							conditionIndices = nil
-							canUseConditionIndex = false
+							// Hash collisions use the old directional scan for this lookup.
 						} else {
 							needsScan = false
 						}
@@ -3990,7 +3962,7 @@ func makeConditionalImportLayerIndices(indices []int, order []cssImportOrder) ma
 
 // This uses a hash of a direct layer condition to avoid checking imports that
 // cannot be redundant. The full predicate validates the selected entry. A
-// collision uses the original directional scan for that duplicate group.
+// collision uses the original directional scan for that lookup.
 func findConditionalImportLayerDuplicate(
 	earlier []css_ast.ImportConditions,
 	conditionIndices map[conditionalImportLayerKey][]int,

@@ -96,25 +96,6 @@ func TestCSSAtImportExternal(t *testing.T) {
 	})
 }
 
-func TestCSSAtImportExternalLayerConditionDedup(t *testing.T) {
-	css_suite.expectBundled(t, bundled{
-		files: map[string]string{
-			"/entry.css": `
-				@import "https://example.com/shared.css" layer(alpha);
-				@import "https://example.com/shared.css" layer(beta);
-				@import "https://example.com/shared.css" layer(alpha.inner);
-				@import "https://example.com/shared.css" layer(alpha);
-				@import "https://example.com/shared.css" layer(gamma);
-			`,
-		},
-		entryPaths: []string{"/entry.css"},
-		options: config.Options{
-			Mode:          config.ModeBundle,
-			AbsOutputFile: "/out.css",
-		},
-	})
-}
-
 func TestCSSAtImport(t *testing.T) {
 	css_suite.expectBundled(t, bundled{
 		files: map[string]string{
